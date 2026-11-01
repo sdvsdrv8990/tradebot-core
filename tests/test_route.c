@@ -160,6 +160,38 @@ int main(void)
         CHECK(tb_route_valid(&r));
     }
 
+    /* Пулы хопов (v0.3): дефолт — нулевые, установка/чтение, выход за
+     * диапазон — нулевой адрес. */
+    {
+        tb_error_clear(&err);
+        tb_addr_t pa, pb, pool;
+        CHECK(tb_addr_from_hex(&pa, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                               &err) == 0);
+        CHECK(tb_addr_from_hex(&pb, "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                               &err) == 0);
+        CHECK(tb_addr_from_hex(&pool, "0x1111111111111111111111111111111111111111",
+                               &err) == 0);
+        tb_route_t r = tb_route_single(&pa, &pb, 3000, &err);
+        tb_addr_t p0;
+        CHECK(tb_route_valid(&r));
+        p0 = tb_route_pool(&r, 0);
+        CHECK(tb_addr_is_native(&p0)); /* не задан */
+
+        tb_route_set_pool(&r, 0, &pool);
+        p0 = tb_route_pool(&r, 0);
+        CHECK(tb_addr_eq(&p0, &pool));
+
+        tb_route_t copy = r; /* POD-копирование переносит пулы */
+        p0 = tb_route_pool(&copy, 0);
+        CHECK(tb_addr_eq(&p0, &pool));
+
+        p0 = tb_route_pool(&r, 1);
+        CHECK(tb_addr_is_native(&p0)); /* вне маршрута */
+        tb_route_set_pool(&r, TB_EXEC_MAX_HOPS, &pool); /* вне массива — игнор */
+        p0 = tb_route_pool(&r, TB_EXEC_MAX_HOPS);
+        CHECK(tb_addr_is_native(&p0));
+    }
+
     printf("OK test_route\n");
     return 0;
 }

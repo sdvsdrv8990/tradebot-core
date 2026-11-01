@@ -70,6 +70,11 @@ size_t tb_addr_to_hex(const tb_addr_t *a, char *buf, size_t cap);
 typedef struct tb_route {
     uint8_t  bytes[TB_ROUTE_MAX_LEN];
     uint32_t len;
+    /* Пул каждого хопа (v0.3: биржа/venue исполнения хопа — пул DEX).
+     * Нулевой адрес = пул не задан (симулятор игнорирует; живой
+     * DEX-адаптер требует явного пула). Аддитивное поле: маршруты,
+     * собранные tb_route_encode(), имеют нулевые пулы. */
+    tb_addr_t pools[TB_EXEC_MAX_HOPS];
 } tb_route_t;
 
 /* Сборка маршрута из токенов и фи (fees[n-1] для n токенов, n >= 2).
@@ -99,6 +104,21 @@ static inline tb_addr_t tb_route_first(const tb_route_t *r)
 static inline tb_addr_t tb_route_last(const tb_route_t *r)
 {
     return tb_route_token(r, tb_route_hops(r));
+}
+
+/* Пул хопа hop (0..hops-1). */
+static inline tb_addr_t tb_route_pool(const tb_route_t *r, size_t hop)
+{
+    if (hop >= TB_EXEC_MAX_HOPS)
+        return tb_addr_zero();
+    return r->pools[hop];
+}
+
+static inline void tb_route_set_pool(tb_route_t *r, size_t hop,
+                                     const tb_addr_t *pool)
+{
+    if (hop < TB_EXEC_MAX_HOPS && r && pool)
+        r->pools[hop] = *pool;
 }
 
 /* Hex всего пути (для следов и журнала). Возврат — требуемая длина с '\0'. */

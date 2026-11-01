@@ -96,6 +96,12 @@ typedef struct tb_exec_cfg {
 
     /* бэкенд */
     tb_addr_t  wrapped_native;       /* ОБЯЗАТЕЛЬНО: адрес wrapped-актива */
+    tb_exec_backend_t *backend;      /* заимствованный бэкенд (v0.3:
+                                        DEX-адаптер вместо симулятора).
+                                        Движок НЕ разрушает его (владение у
+                                        вызывающего). NULL -> симулятор.
+                                        При script != NULL игнорируется
+                                        (сценарный симулятор — для тестов). */
     const tb_exec_sim_scenario_t *script; /* сценарии симулятора; NULL ->
                                              всегда немедленное заполнение */
     uint32_t   script_n;

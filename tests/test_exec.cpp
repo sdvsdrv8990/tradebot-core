@@ -155,6 +155,55 @@ static Outcome run_order(tb_exec_engine_t *e, const tb_exec_order_t &o,
     return out;
 }
 
+/* ---- инъекция бэкенда (v0.3): минимальный заимствованный адаптер ---- */
+static struct {
+    int  calls_quote, calls_submit, calls_poll;
+    bool destroyed;
+} inj_state;
+
+static void inj_destroy_backend(tb_exec_backend_t *b)
+{
+    inj_state.destroyed = true;
+    (void)b;
+}
+
+static int inj_quote(tb_exec_backend_t *b, const tb_route_t *route,
+                     const tb_u256_t *amount_in, uint64_t now_ms,
+                     tb_u256_t *out, tb_error_t *err)
+{
+    (void)b; (void)route; (void)now_ms; (void)err;
+    inj_state.calls_quote++;
+    /* котировка: вход * 2 (без переполнений на масштабах теста) */
+    return tb_u256_mul_u64(out, amount_in, 2) ? 0 : -1;
+}
+
+static int inj_submit(tb_exec_backend_t *b, const tb_route_t *route,
+                      const tb_u256_t *amount_in, const tb_u256_t *min_out,
+                      uint64_t deadline_ms, uint64_t now_ms,
+                      uint64_t *tx_id, tb_u256_t *amount_out, tb_error_t *err)
+{
+    (void)b; (void)route; (void)min_out; (void)deadline_ms; (void)now_ms;
+    inj_state.calls_submit++;
+    *tx_id = 0;
+    return inj_quote(b, route, amount_in, now_ms, amount_out, err);
+}
+
+static int inj_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
+                    tb_u256_t *amount_out, tb_error_t *err)
+{
+    (void)b; (void)tx_id; (void)now_ms; (void)amount_out; (void)err;
+    inj_state.calls_poll++;
+    return -1;
+}
+
+static tb_exec_backend_t inj_backend = {
+    .name    = "inj-test",
+    .destroy = inj_destroy_backend,
+    .quote   = inj_quote,
+    .submit  = inj_submit,
+    .poll    = inj_poll,
+};
+
 int main(void)
 {
     tb_error_t err = TB_ERROR_INIT;
@@ -465,6 +514,38 @@ int main(void)
     CHECK(failed == 6);
     CHECK(traces == 11); /* каждый терминал — event.trace */
     CHECK(other == 0);
+
+    /* ---- инъекция бэкенда (v0.3): заимствованный адаптер вместо
+     * симулятора; движок пользуется, но НЕ разрушает (владение у нас) ---- */
+    {
+        tb_exec_cfg_t inj_cfg = {};
+        inj_cfg.wrapped_native = WETH;
+        inj_cfg.backend        = &inj_backend; /* инъекция вместо симулятора */
+
+        tb_exec_engine_t *e2 = tb_exec_create(&inj_cfg, &err);
+        CHECK(e2 != nullptr);
+
+        tb_wallet_t *w2 = (tb_wallet_t *)tb_exec_wallet(e2);
+        CHECK(deposit(w2, TOK_A, "1000000000000000000", &err));
+
+        tb_exec_order_t o = {};
+        o.token_in   = TOK_A;
+        o.token_out  = TOK_B;
+        o.amount_in  = dec("1000000000000000");
+        o.deadline_ms = tb_wall_ms() + 5000; /* дедлайн — wall-время */
+        o.route      = tb_route_single(&TOK_A, &TOK_B, 3000, &err);
+
+        Outcome out = run_order(e2, o, err);
+        CHECK(out.st == TB_EV_DONE);
+        CHECK(inj_state.calls_quote >= 1);
+        CHECK(inj_state.calls_submit == 1);
+        CHECK(inj_state.destroyed == false);
+
+        tb_exec_destroy(e2);
+        CHECK(inj_state.destroyed == false); /* заимствован — не тронут */
+        inj_destroy_backend(&inj_backend);   /* владелец разрушает сам */
+        CHECK(inj_state.destroyed == true);
+    }
 
     printf("OK test_exec (executed=%d submitted=%d failed=%d traces=%d)\n",
            executed, submitted, failed, traces);

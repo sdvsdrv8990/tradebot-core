@@ -44,6 +44,7 @@ struct tb_exec_engine {
     tb_evreg_t             *reg;
     tb_wallet_t            *wallet;
     tb_exec_backend_t       backend;
+    bool                    backend_borrowed; /* инъекция: destroy не наш */
     tb_ratelimit_t          rl;
     tb_breaker_t            breaker;
     tb_backoff_t            backoff;
@@ -371,10 +372,12 @@ static tb_ev_action_t step_quote(tb_evreg_t *r, tb_event_t *ev, void *user)
     } else {
         /* Авто-минимум от политики проскальзывания: quote * (1 - bp/10000). */
         tb_u256_t m = c->quote;
-        if (!tb_u256_mul_u64(&m, &m, 10000 - e->cfg.max_slippage_bp) ||
-            !tb_u256_div_u64(&m, &m, 10000))
+        if (!tb_u256_mul_u64(&m, &m, 10000 - e->cfg.max_slippage_bp))
             return fail_with(ev, TB_EXEC_OVERFLOW,
                              "переполнение при расчёте авто-минимума");
+        /* div_u64 возвращает остаток: ненулевой остаток — усечение вниз
+         * (копейки), а не ошибка. */
+        (void)tb_u256_div_u64(&m, &m, 10000);
         c->min_out = m;
         char mins[80], qs[80];
         amount_str(&c->min_out, mins, sizeof(mins));
@@ -757,8 +760,12 @@ tb_exec_engine_t *tb_exec_create(const tb_exec_cfg_t *cfg, tb_error_t *err)
         tb_exec_destroy(e);
         return NULL;
     }
-    if (tb_exec_sim_init(&e->backend, e->cfg.script, e->cfg.script_n,
-                         e->cfg.seed, err) != 0) {
+    if (e->cfg.backend && e->cfg.script == NULL) {
+        /* Инъекция (v0.3): живой DEX-адаптер; заимствован, не разрушаем. */
+        e->backend = *e->cfg.backend;
+        e->backend_borrowed = true;
+    } else if (tb_exec_sim_init(&e->backend, e->cfg.script, e->cfg.script_n,
+                                e->cfg.seed, err) != 0) {
         tb_exec_destroy(e);
         return NULL;
     }
@@ -819,7 +826,7 @@ void tb_exec_destroy(tb_exec_engine_t *e)
         e->open_tb[i].ctx      = NULL;
         e->open_tb[i].event_id = 0;
     }
-    if (e->backend.destroy)
+    if (e->backend.destroy && !e->backend_borrowed)
         e->backend.destroy(&e->backend);
     tb_wallet_destroy(e->wallet);
     tb_evreg_destroy(e->reg);
