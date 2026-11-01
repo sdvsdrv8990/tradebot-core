@@ -1,1 +1,0 @@
-/home/admin/projects/tradebot-core/third_party/mbedtls/library/psa_crypto_driver_wrappers_no_static.c

@@ -14,3 +14,4 @@ build/
 bot_key.hex
 /arb_config.json
 logos/
+.build-asan/
