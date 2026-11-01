@@ -257,10 +257,10 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
     if (!resp)
         TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "dex: resp");
     int rc = -1;
-    c->stats.rpc_calls++;
+    tb_atomic_add_u64(&c->stats.rpc_calls, 1);
 
     if (tb_http_request(c->http, &req, resp, err) != 0) {
-        c->stats.rpc_errors++;
+        tb_atomic_add_u64(&c->stats.rpc_errors, 1);
         char reason[96];
         snprintf(reason, sizeof(reason), "%s", err ? err->message : "?");
         TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
@@ -269,7 +269,7 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
         goto out;
     }
     if (resp->status == 429 || resp->status >= 500) {
-        c->stats.rpc_errors++;
+        tb_atomic_add_u64(&c->stats.rpc_errors, 1);
         tb_error_t *te = err;
         TB_ERROR_SET(te, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                      "RPC %s: HTTP %ld%s", venue->name, (long)resp->status,
@@ -286,7 +286,7 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
         goto out;
     }
     if (resp->status != 200) {
-        c->stats.rpc_errors++;
+        tb_atomic_add_u64(&c->stats.rpc_errors, 1);
         TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                      "RPC %s: неожиданный HTTP %ld", venue->name,
                      (long)resp->status);
@@ -309,7 +309,7 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
                 resp->body);
     const char *res = json_str_field(resp->body, "result", &rlen);
     if (!res || json_has_error(resp->body)) {
-        c->stats.rpc_errors++;
+        tb_atomic_add_u64(&c->stats.rpc_errors, 1);
         size_t mlen = 0;
         const char *msg = json_str_field(resp->body, "message", &mlen);
         char mbuf[160] = "нет сообщения";
@@ -330,13 +330,13 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
     if (getenv("TB_DEX_DEBUG"))
         fprintf(stderr, "[dex] result hex (rlen=%zu): %.134s\n", rlen, res);
     if (hex_to_u256(out, res, rlen > 66 ? 66 : rlen, err) != 0) {
-        c->stats.rpc_errors++;
+        tb_atomic_add_u64(&c->stats.rpc_errors, 1);
         DEX_ATTACH_HOP(res);
         TB_ERROR_WRAP(err, "RPC %s", venue->name);
         goto out;
     }
     if (tb_u256_is_zero(out)) {
-        c->stats.rpc_errors++;
+        tb_atomic_add_u64(&c->stats.rpc_errors, 1);
         TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_INSUFFICIENT_LIQUIDITY,
                      "RPC %s: нулевая котировка (rlen=%zu)", venue->name,
                      rlen);
@@ -379,7 +379,7 @@ static int dex_quote_route(dex_ctx_t *c, const tb_route_t *route,
         }
         v = *out;
     }
-    c->stats.quotes++;
+    tb_atomic_add_u64(&c->stats.quotes, 1);
     return 0;
 }
 
@@ -414,7 +414,7 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
 {
     (void)deadline_ms;
     dex_ctx_t *c = b->ctx;
-    c->stats.submits++;
+    tb_atomic_add_u64(&c->stats.submits, 1);
 
     /* Свежая котировка на момент отправки (как живой роутер). */
     tb_u256_t out;
@@ -547,7 +547,7 @@ static int dex_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
             memset(amount_out, 0, sizeof(*amount_out)); /* стало меньше */
 
         s->tx_id = 0;
-        c->stats.fills++;
+        tb_atomic_add_u64(&c->stats.fills, 1);
         return 0; /* заполнено: фактический выход с цепи */
     }
 
@@ -556,7 +556,7 @@ static int dex_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
 
     *amount_out = s->amount_out;
     s->tx_id = 0;
-    c->stats.fills++;
+    tb_atomic_add_u64(&c->stats.fills, 1);
     return 0; /* заполнено (shadow: по цене submit-котировки) */
 }
 

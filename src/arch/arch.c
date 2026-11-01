@@ -202,3 +202,13 @@ void tb_atomic_store_bool(volatile bool *p, bool v)
 {
     __atomic_store_n((bool *)p, v, __ATOMIC_SEQ_CST);
 }
+
+uint64_t tb_atomic_add_u64(volatile uint64_t *p, uint64_t v)
+{
+    return __atomic_fetch_add((uint64_t *)p, v, __ATOMIC_RELAXED);
+}
+
+uint64_t tb_atomic_load_u64(const volatile uint64_t *p)
+{
+    return __atomic_load_n((const uint64_t *)p, __ATOMIC_RELAXED);
+}

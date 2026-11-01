@@ -3,6 +3,7 @@
 
 # Каталоги сборки
 .build/
+.build-tsan/
 build/
 
 # Журналы демо (генерируются make run / run-events / run-exec в корне)

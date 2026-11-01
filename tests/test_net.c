@@ -5,6 +5,7 @@
  *  HTTPS к реальным хостам здесь не тестируется (окружение-зависимо):
  *  живой сетевой прогон — arb_demo с реальным RPC.
  * ========================================================================== */
+#include "tb/arch/arch.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -33,7 +34,7 @@ typedef struct mock_srv {
 static void *mock_thread(void *arg)
 {
     mock_srv_t *s = arg;
-    while (!s->stop) {
+    while (!tb_atomic_load_bool(&s->stop)) {
         int c = accept(s->fd, NULL, NULL);
         if (c < 0)
             break;
@@ -94,7 +95,7 @@ static void *mock_thread(void *arg)
 
 static void mock_start(mock_srv_t *s)
 {
-    s->stop = false;
+    tb_atomic_store_bool(&s->stop, false);
     s->fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;
@@ -115,9 +116,10 @@ static void mock_start(mock_srv_t *s)
 
 static void mock_stop(mock_srv_t *s)
 {
-    s->stop = true;
-    close(s->fd);
+    tb_atomic_store_bool(&s->stop, true);
+    shutdown(s->fd, SHUT_RDWR); /* будит accept() (close — нет) */
     pthread_join(s->th, NULL);
+    close(s->fd);
 }
 
 /* ---- тесты ---- */

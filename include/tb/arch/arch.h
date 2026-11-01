@@ -50,6 +50,9 @@ void tb_spin_unlock(tb_spinlock_t *l);
 /* ---- Обёртки над GCC-атомиками: совместимы с C и C++ (без <stdatomic.h>) ---- */
 bool tb_atomic_load_bool(const volatile bool *p);
 void tb_atomic_store_bool(volatile bool *p, bool v);
+/* RELAXED-счётчики: инкремент из многих потоков, чтение для статистики. */
+uint64_t tb_atomic_add_u64(volatile uint64_t *p, uint64_t v);
+uint64_t tb_atomic_load_u64(const volatile uint64_t *p);
 
 /* ---- Хеш для дедупликации ---- */
 uint64_t tb_hash64(const void *data, size_t len, uint64_t seed);

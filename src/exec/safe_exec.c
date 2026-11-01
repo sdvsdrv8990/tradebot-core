@@ -433,19 +433,23 @@ int tb_safe_receipt(tb_http_t *h, const tb_safe_cfg_t *c,
     if (rpc_call(h, c, "eth_getTransactionReceipt", params, res, sizeof(res),
                  &owner, err) != 0)
         return -1;
-    /* статус ищем в СЫРОМ теле (объект receipt может быть длинным) */
+    /* статус ищем в СЫРОМ теле (объект receipt может быть длинным);
+     * st указывает внутрь owner.resp — используем ДО free (иначе UAF) */
     const char *st = strstr(owner.body, "\"status\":\"0x");
-    free(owner.resp);
 
     if (strcmp(res, "null") == 0 || strstr(res, "null") == res) {
+        free(owner.resp);
         *is_null = true;
         return 0;
     }
     *is_null = false;
-    if (!st)
+    if (!st) {
+        free(owner.resp);
         TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                       "receipt: нет статуса");
+    }
     *status = (int)strtol(st + 12, NULL, 16);
+    free(owner.resp);
     return 0;
 }
 

@@ -88,7 +88,8 @@ RUNTIME_SRC := src/json/envelope.cpp src/json/config.cpp
 NET_SRC     := src/net/http.c
 SIGN_SRC   := src/sign/tx.c
 DEX_SRC     := src/exec/backend_dex.c src/exec/safe_exec.c
-USER_SRC    := src/user/filters.c src/user/decision.c src/user/arb.c
+USER_SRC    := src/user/filters.c src/user/decision.c src/user/arb.c \
+              src/user/webui.c
 
 CORE_OBJ   := $(addprefix $(BUILD)/,$(CORE_SRC:.c=.o))
 RUNTIME_OBJ:= $(addprefix $(BUILD)/,$(RUNTIME_SRC:.cpp=.o))

@@ -11,55 +11,37 @@
 
 ---
 
-## Установка и сборка
+## Развёртывание и запуск
 
-Всё поднимается **одной командой из корневого каталога проекта**:
-зависимости ставятся локально в `.deps/` (python-venv с cmake/ninja,
-без root), вендорные библиотеки (rapidjson, mbedTLS, secp256k1) — уже
-в `third_party/`, сборка — в `.build/`, тесты прогоняются.
-
-```bash
-./setup.sh          # зависимости + сборка + тесты (одна команда)
-```
-
-Отдельные стадии:
+Одна команда из корневого каталога проекта: при необходимости собирает
+(зависимости локально в `.deps/`, без root; сборка в `.build/`; тесты)
+и поднимает бота вместе с веб-мордой. Привязки ко времени нет — бот
+работает до остановки.
 
 ```bash
-./setup.sh deps     # только зависимости
-./setup.sh build    # только конфигурация и сборка
-./setup.sh test     # только тесты
-
-# Основной путь руками (то же, что build):
-cmake -B .build -DCMAKE_BUILD_TYPE=RelWithDebInfo -G Ninja
-cmake --build .build -j
-
-# Запасной путь без CMake — из корня собирает всё, включая вендор:
-make -j$(nproc) && make test
+./run.sh            # сборка (если нужно) + бот + веб-морда http://127.0.0.1:8080
+./run.sh stop       # корректная остановка (итоги, журнал, морда гасится)
+./run.sh status     # запущен ли бот и порт морды
 ```
 
+Остановка любым стандартным способом: `./run.sh stop`, `Ctrl+C` из
+терминала, `kill <pid>` — бот завершается штатно, печатает итоги и
+закрывает журнал.
+
+Режимы и параметры — переменными окружения:
+
+```bash
+TB_MODE=replay      ./run.sh   # по умолчанию: офлайн-демо на mock-RPC
+TB_MODE=live        ./run.sh   # живые котировки mainnet, без отправки сделок
+TB_MODE=live-exec   ./run.sh   # живое исполнение из Safe (см. ниже)
+TB_WEB_PORT=8080 TB_CONFIG=docs/arb_config.example.json TB_LEDGER=./arb_demo.jsonl
+```
+
+Отдельные стадии сборки: `./setup.sh [deps | build | test]` (без
+аргумента — всё). Запасной путь без CMake: `make -j$(nproc) && make test`.
 Тесты: 26 (unit + интеграционные, офлайн — сеть не нужна).
 
-## Запуск
-
-Демо лежат в `.build/` (запасной путь — `build/`). Общие аргументы:
-`--duration МС`, `--ledger ПУТЬ`, `--seed N`; выход — `Ctrl+C`,
-журнал закрывается штатно.
-
-```bash
-# Арбитраж офлайн: mock-RPC со спредом, полный конвейер (8 секунд)
-./.build/arb_demo --replay --duration 8000 --ledger ./arb_demo.jsonl
-
-# Арбитраж: живые котировки mainnet, shadow-исполнение (25 секунд)
-./.build/arb_demo --duration 25000 --ledger ./arb_demo.jsonl
-
-# Живое исполнение из Safe (см. ниже)
-./.build/arb_demo --live-exec --duration 60000 --ledger ./arb_demo.jsonl
-
-# Демо подсистем: опрос источников / реестр событий / механизм торговли
-./.build/bot_demo    --duration 15000 --ledger ./bot.jsonl --seed 42
-./.build/events_demo --duration 30000 --ledger ./events.jsonl
-./.build/exec_demo   --duration 14000 --ledger ./exec.jsonl --seed 42
-```
+Демо подсистем (после сборки лежат в `.build/`):
 
 | Демо | Что показывает |
 |---|---|
@@ -82,7 +64,7 @@ make -j$(nproc) && make test
 2. Пополнить контракт WETH.
 3. Ключ: `openssl rand -hex 32 > bot_key.hex` (не коммитить!), в
    конфиге `network` задать `safe`, `key_file`, `live_exec: true`.
-4. `./.build/arb_demo --live-exec …` — газ реальный (~$0.5–2/сделка).
+4. `TB_MODE=live-exec ./run.sh` — газ реальный (~$0.5–2/сделка).
    Контракт и историю адреса видно в app.safe.global и Zerion/DeBank.
 
 Конфиг: `docs/arb_config.example.json` (venues/RPC/пулы, пороги
@@ -92,7 +74,8 @@ make -j$(nproc) && make test
 
 ```
 tradebot-core/
-├── setup.sh                    # одна команда: зависимости + сборка + тесты
+├── run.sh                     # развёртывание: бот + веб-морда одной командой
+├── setup.sh                   # стадии сборки: deps | build | test | всё
 ├── CMakeLists.txt / Makefile   # сборка (основная + запасной путь без CMake)
 ├── include/tb/                 # публичные заголовки (C-ABI)
 │   ├── core/     #   error, registry, ids, detail, keccak, log, time, alloc

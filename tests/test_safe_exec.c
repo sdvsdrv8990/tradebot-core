@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "harness.h"
+#include "tb/arch/arch.h"
 #include "tb/core/error.h"
 #include "tb/exec/backend_dex.h"
 #include "tb/exec/safe_exec.h"
@@ -124,7 +125,7 @@ static void serve(mock_t *m, int c)
 static void *mock_thread(void *arg)
 {
     mock_t *m = arg;
-    while (!m->stop) {
+    while (!tb_atomic_load_bool(&m->stop)) {
         int c = accept(m->fd, NULL, NULL);
         if (c < 0)
             break;
@@ -135,7 +136,7 @@ static void *mock_thread(void *arg)
 
 static void mock_start(mock_t *m)
 {
-    m->stop = false;
+    m->stop = false; /* инициализация до pthread_create — гонки нет */
     m->sent_count = 0;
     m->receipts_served = 0;
     m->balance_after = 1500;
@@ -157,9 +158,10 @@ static void mock_start(mock_t *m)
 
 static void mock_stop(mock_t *m)
 {
-    m->stop = true;
-    close(m->fd);
+    tb_atomic_store_bool(&m->stop, true);
+    shutdown(m->fd, SHUT_RDWR); /* будит accept() (close — нет) */
     pthread_join(m->th, NULL);
+    close(m->fd);
 }
 
 static void fill_cfg(tb_exec_dex_cfg_t *cfg, mock_t *m)

@@ -14,8 +14,9 @@
  *  отмены. Итог: статистика + виртуальный PnL + журнал decision.* /
  *  trade.* / event.trace в JSONL.
  *
- *    ./arb_demo [--config docs/arb_config.example.json] [--duration 15000]
- *               [--ledger ./arb_demo.jsonl] [--replay]
+ *    ./arb_demo [--config docs/arb_config.example.json] [--ledger ./arb_demo.jsonl]
+ *               [--duration МС (0=бессрочно, дефолт)] [--replay] [--live-exec]
+ *               [--web-port N] [--no-web]
  * ========================================================================== */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -29,6 +30,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "tb/arch/arch.h"
 #include "tb/core/time.h"
 #include "tb/exec/backend_dex.h"
 #include "tb/exec/safe_exec.h"
@@ -38,6 +40,7 @@
 #include "tb/ledger/ledger.h"
 #include "tb/sched/loop.h"
 #include "tb/user/arb.h"
+#include "tb/user/webui.h"
 
 /* ---- mock-RPC: синтетический рынок для --replay ---- */
 
@@ -141,7 +144,7 @@ static uint64_t mock_quote(const char *data_hex)
 static void *mock_thread(void *arg)
 {
     mock_rpc_t *m = arg;
-    while (!m->stop) {
+    while (!tb_atomic_load_bool(&m->stop)) {
         int c = accept(m->fd, NULL, NULL);
         if (c < 0)
             break;
@@ -200,7 +203,7 @@ static void *mock_thread(void *arg)
 
 static void mock_start(mock_rpc_t *m)
 {
-    m->stop = false;
+    tb_atomic_store_bool(&m->stop, false);
     m->fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;
@@ -219,9 +222,11 @@ static void mock_start(mock_rpc_t *m)
 
 static void mock_stop(mock_rpc_t *m)
 {
-    m->stop = true;
-    close(m->fd);
+    tb_atomic_store_bool(&m->stop, true);
+    /* shutdown будит accept() в потоке сервера (close — нет), close после join */
+    shutdown(m->fd, SHUT_RDWR);
     pthread_join(m->th, NULL);
+    close(m->fd);
 }
 
 /* ---- приложение ---- */
@@ -231,7 +236,22 @@ typedef struct app {
     tb_evreg_t        *reg;   /* реестр движка */
     mock_rpc_t         mock;
     bool               replay;
+    tb_webui_t        *web;
+    tb_arb_t          *arb;
+    tb_exec_engine_t  *engine;
+    tb_u256_t          start_weth;
+    const tb_arb_cfg_t *cfg;
+    uint64_t           started_ms;
 } app_t;
+
+static app_t g_app;
+
+static void on_sigint(int sig)
+{
+    (void)sig;
+    if (g_app.loop)
+        tb_loop_stop(g_app.loop); /* как в bot_demo: из обработчика можно */
+}
 
 static void stop_task(tb_loop_t *loop, tb_task_t *task, void *arg)
 {
@@ -240,9 +260,59 @@ static void stop_task(tb_loop_t *loop, tb_task_t *task, void *arg)
     tb_loop_stop(loop);
 }
 
-static void on_sigint(int sig)
+
+static void web_update_task(tb_loop_t *loop, tb_task_t *task, void *arg)
 {
-    (void)sig;
+    (void)loop; (void)task;
+    app_t *d = arg;
+    if (!d->web)
+        return;
+    const tb_arb_stats_t *as = tb_arb_stats(d->arb);
+    const tb_exec_stats_t *es = tb_exec_stats(d->engine);
+    tb_wallet_t *w = (tb_wallet_t *)tb_exec_wallet(d->engine);
+    tb_u256_t bal = tb_wallet_balance(w, &d->cfg->weth);
+    tb_u256_t pnl;
+    bool profit = tb_u256_sub(&pnl, &bal, &d->start_weth);
+    char bal_s[80], pnl_s[80];
+    tb_u256_to_dec(&bal, bal_s, sizeof(bal_s));
+    tb_u256_t zero = tb_u256_from_u64(0);
+    tb_u256_to_dec(profit ? &pnl : &zero, pnl_s, sizeof(pnl_s));
+    char mode[24];
+    snprintf(mode, sizeof(mode), "%s%s",
+             d->replay ? "replay" : "live-котировки",
+             d->cfg->dex.live ? " + Safe" : "");
+    char json[2048];
+    snprintf(json, sizeof(json),
+             "{\"mode\":\"%s\",\"uptime_ms\":%llu,\"cards\":["
+             "{\"t\":\"опросы\",\"v\":\"%llu\"},"
+             "{\"t\":\"котировок\",\"v\":\"%llu\"},"
+             "{\"t\":\"отсеяно фильтрами\",\"v\":\"%llu\"},"
+             "{\"t\":\"пар оценено\",\"v\":\"%llu\"},"
+             "{\"t\":\"выгодных\",\"v\":\"%llu\"},"
+             "{\"t\":\"ордеров подано\",\"v\":\"%llu\"},"
+             "{\"t\":\"filled\",\"v\":\"%llu\",\"cls\":\"good\"},"
+             "{\"t\":\"failed\",\"v\":\"%llu\",\"cls\":\"bad\"},"
+             "{\"t\":\"canceled\",\"v\":\"%llu\"},"
+             "{\"t\":\"ошибок котировщика\",\"v\":\"%llu\"},"
+             "{\"t\":\"кошелёк WETH wei\",\"v\":\"%s\"},"
+             "{\"t\":\"PnL wei%s\",\"v\":\"%s%s\",\"cls\":\"%s\"}]}",
+             mode,
+             (unsigned long long)(tb_now_ms() - d->started_ms),
+             (unsigned long long)as->polls,
+             (unsigned long long)as->quotes,
+             (unsigned long long)as->filter_rejects,
+             (unsigned long long)as->pairs_evaluated,
+             (unsigned long long)as->pairs_profitable,
+             (unsigned long long)as->orders_submitted,
+             (unsigned long long)es->filled,
+             (unsigned long long)es->failed,
+             (unsigned long long)es->canceled,
+             (unsigned long long)as->quote_errors,
+             bal_s,
+             profit ? "" : " (−)",
+             profit ? "" : "-", pnl_s,
+             profit ? "good" : "bad");
+    tb_webui_set_json(d->web, json);
 }
 
 typedef struct resume_arg {
@@ -298,9 +368,10 @@ int main(int argc, char **argv)
 {
     const char *cfg_path = "docs/arb_config.example.json";
     const char *ledger_path = "./arb_demo.jsonl";
-    uint64_t duration_ms = 15000;
+    uint64_t duration_ms = 0; /* 0 = без ограничения по времени */
     bool replay = false;
     bool live_exec = false;
+    long web_port = 8080;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
@@ -313,10 +384,15 @@ int main(int argc, char **argv)
             replay = true;
         else if (strcmp(argv[i], "--live-exec") == 0)
             live_exec = true;
+        else if (strcmp(argv[i], "--web-port") == 0 && i + 1 < argc)
+            web_port = strtol(argv[++i], NULL, 10);
+        else if (strcmp(argv[i], "--no-web") == 0)
+            web_port = 0;
         else {
             fprintf(stderr,
                     "использование: %s [--config ФАЙЛ] [--ledger ФАЙЛ] "
-                    "[--duration МС] [--replay] [--live-exec]\n",
+                    "[--duration МС (0=бессрочно)] [--replay] [--live-exec] "
+                    "[--web-port N] [--no-web]\n",
                     argv[0]);
             return 2;
         }
@@ -324,7 +400,8 @@ int main(int argc, char **argv)
 
     setvbuf(stdout, NULL, _IOLBF, 0); /* построчно: демо читают через пайп */
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGINT, on_sigint);
+    signal(SIGINT, on_sigint);  /* Ctrl+C из терминала */
+    signal(SIGTERM, on_sigint); /* стандартная остановка Linux: kill, systemctl */
     tb_error_t err = TB_ERROR_INIT;
 
     /* ---- конфигурация ---- */
@@ -440,6 +517,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "цикл: %s\n", err.message);
         return 1;
     }
+    g_app.loop = app.loop; /* теперь обработчик сигналов может остановить цикл */
     tb_evreg_on_state(app.reg, 1u << TB_EV_BLOCKED, bridge_observer, &app);
 
     /* ---- конвейер арбитража ---- */
@@ -453,6 +531,27 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* ---- веб-морда: дашборд + статус + журнал (127.0.0.1) ---- */
+    app.arb = arb;
+    app.engine = engine;
+    app.cfg = &cfg;
+    app.start_weth = start;
+    app.started_ms = tb_now_ms();
+    if (web_port > 0) {
+        tb_error_t werr = TB_ERROR_INIT;
+        if (tb_webui_start(&app.web, (uint16_t)web_port, ledger_path,
+                           &werr) != 0) {
+            fprintf(stderr, "веб-морда: %s (продолжаем без неё)\n",
+                    werr.message);
+        } else {
+            printf("веб-морда: http://127.0.0.1:%u\n",
+                   (unsigned)tb_webui_port(app.web));
+            tb_loop_call_every(app.loop, 2000, TB_PRIO_LOW, "web.update",
+                               web_update_task, &app, NULL);
+            web_update_task(app.loop, NULL, &app);
+        }
+    }
+
     printf("арбитраж: %u пулов, период %llu мс, минимум %llu wei, верх "
            "контракта %llu wei\n",
            cfg.pools_n, (unsigned long long)cfg.poll_ms,
@@ -460,9 +559,17 @@ int main(int argc, char **argv)
            (unsigned long long)cfg.max_trade_wei);
 
     /* ---- прогон ---- */
-    tb_loop_call_later(app.loop, duration_ms, TB_PRIO_CRITICAL, "stop",
-                        stop_task, NULL, NULL);
+    if (duration_ms > 0)
+        tb_loop_call_later(app.loop, duration_ms, TB_PRIO_CRITICAL, "stop",
+                            stop_task, NULL, NULL);
     tb_loop_run(app.loop);
+    g_app.loop = NULL; /* цикл остановлен: сигналы больше его не трогают */
+
+    /* веб-морду глушим до разрушения объектов, которые она показывала */
+    if (app.web) {
+        tb_webui_stop(app.web);
+        app.web = NULL;
+    }
 
     /* ---- итоги ---- */
     const tb_arb_stats_t *as = tb_arb_stats(arb);

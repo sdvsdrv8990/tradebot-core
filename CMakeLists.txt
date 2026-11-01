@@ -131,6 +131,7 @@ add_library(tb_user STATIC
   src/user/filters.c
   src/user/decision.c
   src/user/arb.c
+  src/user/webui.c
 )
 target_include_directories(tb_user PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(tb_user PUBLIC tb_dex tb_net tb_core)
