@@ -53,6 +53,15 @@ set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
 set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
 
+# secp256k1 (вендор) — подпись ECDSA для живых транзакций (v0.4)
+set(SECP256K1_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_EXHAUSTIVE_TESTS OFF CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_CTIME_TESTS OFF CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/secp256k1 EXCLUDE_FROM_ALL)
+
 # ---------------------------------------------------------------------------
 #  tb_core — C11-ядро
 # ---------------------------------------------------------------------------
@@ -61,6 +70,7 @@ add_library(tb_core STATIC
   src/core/error_registry.c
   src/core/ids.c
   src/core/detail.c
+  src/core/keccak.c
   src/core/log.c
   src/core/time.c
   src/core/alloc.c
@@ -179,6 +189,7 @@ set(TB_C_TESTS
   test_ids
   test_details
   test_ctx
+  test_keccak
 )
 foreach(name IN LISTS TB_C_TESTS)
   add_executable(${name} tests/${name}.c)

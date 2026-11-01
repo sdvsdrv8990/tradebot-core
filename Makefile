@@ -28,6 +28,15 @@ LDFLAGS_NET := $(BUILD)/libmbed_tls.a
 # ---------- mbedTLS (вендор, TLS для HTTP-транспорта v0.3) ----------
 # Прямая компиляция исходников (конфиги PSA уже в дереве, генерация не нужна).
 MBEDTLS_SRC := $(wildcard third_party/mbedtls/library/*.c)
+
+# secp256k1: один зонтичный файл + предвычисленные таблицы
+SECP_DIR  := third_party/secp256k1
+SECP_SRC  := $(SECP_DIR)/src/secp256k1.c \
+             $(SECP_DIR)/src/precomputed_ecmult.c \
+             $(SECP_DIR)/src/precomputed_ecmult_gen.c
+SECP_OBJ  := $(patsubst $(SECP_DIR)/src/%.c,$(BUILD)/secp256k1/%.o,$(SECP_SRC))
+SECP_CFLAGS := -std=c99 -O2 -g -I$(SECP_DIR)/include -I$(SECP_DIR)/src \
+               -I$(BUILD)/secp256k1/src
 MBEDTLS_OBJ := $(patsubst third_party/mbedtls/library/%.c,$(BUILD)/mbedtls/%.o,$(MBEDTLS_SRC))
 MBEDTLS_CFLAGS := -std=c99 -O2 -g -Ithird_party/mbedtls/include -Ithird_party/mbedtls/library
 
@@ -45,6 +54,7 @@ CORE_SRC := \
   src/core/error_registry.c \
   src/core/ids.c \
   src/core/detail.c \
+  src/core/keccak.c \
   src/core/log.c \
   src/core/time.c \
   src/core/alloc.c \
@@ -85,7 +95,7 @@ TEST_C_BINS  := test_error test_registry test_arch test_pqueue test_timer \
         test_backoff test_runtime test_events test_ledger test_loop \
         test_u256 test_route test_wallet test_net test_backend_dex \
         test_filters test_decision test_config test_ids test_details \
-        test_ctx
+        test_ctx test_keccak
 TEST_CXX_BINS:= test_envelope test_exec
 TEST_BINS    := $(TEST_C_BINS) $(TEST_CXX_BINS)
 
