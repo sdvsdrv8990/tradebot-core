@@ -1,0 +1,230 @@
+/* ==========================================================================
+ *  tb/core/error.c — реализация ядра обработки ошибок.
+ *
+ *  tb_error_t — POD-значение без владения кучей: безопасно к нулевой
+ *  инициализации, копируется присваиванием. Контекст накапливается
+ *  текстовым следом (message/location), а не цепочкой указателей.
+ * ========================================================================== */
+#include "tb/core/error.h"
+#include "tb/core/error_registry.h"
+#include "tb/core/log.h"
+#include "tb/core/strutil.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ---- Глобальный обработчик ---- */
+static tb_error_handler_fn g_handler;
+static void               *g_handler_user;
+static tb_panic_fn         g_panic;
+static void               *g_panic_user;
+
+const char *tb_domain_name(uint8_t domain)
+{
+    switch (domain) {
+    case TB_DOMAIN_CORE:   return "CORE";
+    case TB_DOMAIN_SCHED:  return "SCHED";
+    case TB_DOMAIN_NET:    return "NET";
+    case TB_DOMAIN_API:    return "API";
+    case TB_DOMAIN_LEDGER: return "LEDGER";
+    case TB_DOMAIN_JSON:   return "JSON";
+    case TB_DOMAIN_EVENTS: return "EVENTS";
+    case TB_DOMAIN_USER:   return "USER";
+    default:               return "NONE";
+    }
+}
+
+const char *tb_severity_name(tb_severity_t sev)
+{
+    switch (sev) {
+    case TB_SEV_INFO:  return "INFO";
+    case TB_SEV_WARN:  return "WARN";
+    case TB_SEV_ERROR: return "ERROR";
+    case TB_SEV_FATAL: return "FATAL";
+    default:           return "?";
+    }
+}
+
+void tb_error_clear(tb_error_t *err)
+{
+    if (!err) return;
+    memset(err, 0, sizeof(*err));
+}
+
+bool tb_error_is_set(const tb_error_t *err)
+{
+    return err && (err->domain != TB_DOMAIN_NONE || err->code != 0);
+}
+
+static void error_setv(tb_error_t *err, uint8_t domain, uint32_t code,
+                       const char *location, const char *fmt, va_list ap)
+{
+    tb_error_t fresh;
+    memset(&fresh, 0, sizeof(fresh));
+    fresh.domain = domain;
+    fresh.code   = code;
+    tb_registry_decorate(&fresh);
+    if (fmt) {
+        vsnprintf(fresh.message, sizeof(fresh.message), fmt, ap);
+        tb_utf8_fit(fresh.message, sizeof(fresh.message));
+    }
+    if (location)
+        snprintf(fresh.location, sizeof(fresh.location), "%s", location);
+    *err = fresh; /* POD: присваивание целиком, без владения */
+}
+
+void tb_error_set(tb_error_t *err, uint8_t domain, uint32_t code,
+                  const char *location, const char *fmt, ...)
+{
+    va_list ap;
+    if (!err) return;
+    va_start(ap, fmt);
+    error_setv(err, domain, code, location, fmt, ap);
+    va_end(ap);
+}
+
+void tb_error_wrap(tb_error_t *err, const char *location, const char *fmt, ...)
+{
+    if (!err || !tb_error_is_set(err)) return;
+
+    char addend[TB_ERROR_MSG_MAX];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(addend, sizeof(addend), fmt, ap);
+    va_end(ap);
+    tb_utf8_fit(addend, sizeof(addend));
+
+    char orig[TB_ERROR_MSG_MAX];
+    memcpy(orig, err->message, sizeof(orig));
+
+    if (orig[0] != '\0')
+        snprintf(err->message, sizeof(err->message), "%s: %s", addend, orig);
+    else
+        snprintf(err->message, sizeof(err->message), "%s", addend);
+    tb_utf8_fit(err->message, sizeof(err->message));
+
+    if (location) {
+        char origloc[TB_ERROR_LOC_MAX];
+        memcpy(origloc, err->location, sizeof(origloc));
+        if (origloc[0] != '\0')
+            snprintf(err->location, sizeof(err->location), "%s <- %s", location, origloc);
+        else
+            snprintf(err->location, sizeof(err->location), "%s", location);
+    }
+}
+
+void tb_error_promote(tb_error_t *err, uint8_t domain, uint32_t code,
+                      const char *location, const char *fmt, ...)
+{
+    if (!err) return;
+
+    char orig[TB_ERROR_MSG_MAX];
+    char origloc[TB_ERROR_LOC_MAX];
+    memcpy(orig, err->message, sizeof(orig));
+    memcpy(origloc, err->location, sizeof(origloc));
+
+    va_list ap;
+    va_start(ap, fmt);
+    error_setv(err, domain, code, location, fmt, ap);
+    va_end(ap);
+
+    /* Прежнее сообщение сохраняется следом. */
+    if (orig[0] != '\0') {
+        char fresh[TB_ERROR_MSG_MAX];
+        memcpy(fresh, err->message, sizeof(fresh));
+        if (fresh[0] != '\0')
+            snprintf(err->message, sizeof(err->message), "%s <- %s", fresh, orig);
+        else
+            snprintf(err->message, sizeof(err->message), "%s", orig);
+        tb_utf8_fit(err->message, sizeof(err->message));
+    }
+    if (origloc[0] != '\0') {
+        char freshloc[TB_ERROR_LOC_MAX];
+        memcpy(freshloc, err->location, sizeof(freshloc));
+        if (freshloc[0] != '\0')
+            snprintf(err->location, sizeof(err->location), "%s <- %s", freshloc, origloc);
+        else
+            snprintf(err->location, sizeof(err->location), "%s", origloc);
+    }
+}
+
+size_t tb_error_format(const tb_error_t *err, char *buf, size_t cap)
+{
+    if (!err || !buf || cap == 0) return 0;
+
+    size_t n = 0;
+#define TB_APPEND(...) do {                                                   \
+        int rc_ = snprintf(buf + n, cap - n, __VA_ARGS__);                     \
+        if (rc_ < 0) return 0;                                                \
+        n += ((size_t)rc_ < cap - n) ? (size_t)rc_ : (cap - n - 1);            \
+    } while (0)
+
+    const tb_error_meta_t *meta = tb_registry_meta(err->domain, err->code);
+    TB_APPEND("[%s/%s", tb_domain_name(err->domain), meta ? meta->name : "?");
+    if (err->http_status > 0)
+        TB_APPEND("|HTTP %d", err->http_status);
+    if (err->retry_after_ms > 0)
+        TB_APPEND("|retry_after=%ums", err->retry_after_ms);
+    TB_APPEND("|%s", err->retryable ? "retryable" : "permanent");
+    TB_APPEND("] %s", err->message[0] ? err->message : "-");
+    if (err->location[0])
+        TB_APPEND(" @ %s", err->location);
+#undef TB_APPEND
+    tb_utf8_fit(buf, cap); /* итоговая строка могла оборвать символ */
+    return n;
+}
+
+/* ---- Глобальный обработчик ---- */
+
+tb_error_handler_fn tb_set_error_handler(tb_error_handler_fn handler, void *user)
+{
+    tb_error_handler_fn prev = g_handler;
+    g_handler      = handler;
+    g_handler_user = user;
+    return prev;
+}
+
+void tb_report(const tb_error_t *err)
+{
+    if (!err || !g_handler) return;
+    g_handler(err, g_handler_user);
+    if (err->severity == TB_SEV_FATAL)
+        tb_panic(err->location, "%s", err->message);
+}
+
+tb_panic_fn tb_set_panic_handler(tb_panic_fn fn, void *user)
+{
+    tb_panic_fn prev = g_panic;
+    g_panic      = fn;
+    g_panic_user = user;
+    return prev;
+}
+
+void tb_panic(const char *location, const char *fmt, ...)
+{
+    char msg[TB_ERROR_MSG_MAX];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    tb_utf8_fit(msg, sizeof(msg));
+
+    tb_error_t err = TB_ERROR_INIT;
+    err.domain    = TB_DOMAIN_CORE;
+    err.code      = TB_CORE_UNSUPPORTED;
+    err.severity  = TB_SEV_FATAL;
+    err.retryable = false;
+    snprintf(err.message, sizeof(err.message), "FATAL: %s", msg);
+    tb_utf8_fit(err.message, sizeof(err.message));
+    if (location)
+        snprintf(err.location, sizeof(err.location), "%s", location);
+
+    if (g_panic) {
+        g_panic(&err, g_panic_user);
+        abort(); /* обработчик не остановил выполнение — страховка */
+    }
+    TB_LOG(TB_LOG_FATAL, "panic: %s (%s)", msg, location ? location : "?");
+    abort();
+}

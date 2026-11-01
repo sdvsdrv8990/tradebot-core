@@ -1,0 +1,11 @@
+# Локальное окружение и зависимости (./setup.sh)
+.deps/
+
+# Каталоги сборки
+.build/
+build/
+
+# Журналы демо (генерируются make run / run-events / run-exec в корне)
+/tradebot_events.jsonl
+/events_demo.jsonl
+/exec_demo.jsonl
