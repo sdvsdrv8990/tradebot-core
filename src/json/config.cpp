@@ -217,6 +217,33 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
                           "config: decision числа");
     }
 
+    /* network: {chain_id, safe, router, key_file, live_exec, max_fee_wei} */
+    auto net = doc.FindMember("network");
+    if (net != doc.MemberEnd() && net->value.IsObject()) {
+        const auto &v = net->value;
+        uint64_t chain = 0, max_fee = 0;
+        if (!u64_field(v, "chain_id", &chain)
+            || !u64_field(v, "max_fee_wei", &max_fee))
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: network числа");
+        out->dex.live = false;
+        auto le = v.FindMember("live_exec");
+        if (le != v.MemberEnd() && le->value.IsBool())
+            out->dex.live = le->value.GetBool();
+        out->dex.safe.chain_id = chain;
+        out->dex.safe.max_fee_wei = max_fee;
+        if (!addr_field(v, "safe", &out->dex.safe.safe, err))
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: network.safe не адрес");
+        if (!addr_field(v, "router", &out->dex.safe.router, err))
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: network.router не адрес");
+        if (!str_field(v, "key_file", out->key_file,
+                       sizeof(out->key_file)))
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: network.key_file");
+    }
+
     /* fill_delay для shadow-бэкенда */
     uint64_t fmin = 0, fmax = 0;
     if (dec != doc.MemberEnd() && dec->value.IsObject()) {

@@ -46,8 +46,11 @@ typedef struct tb_arb_pool {
 } tb_arb_pool_t;
 
 typedef struct tb_arb_cfg {
-    /* venues: RPC + quoter + приписанные пулы (см. tb_exec_dex_cfg_t) */
+    /* venues: RPC + quoter + приписанные пулы (см. tb_exec_dex_cfg_t).
+     * network-секция конфига заполняет dex.safe и dex.live. */
     tb_exec_dex_cfg_t dex;
+    char              key_file[TB_HTTP_URL_MAX]; /* приватный ключ бота
+                                                    (hex), 64 символа */
 
     tb_addr_t weth; /* ОБЯЗАТЕЛЬНО */
 

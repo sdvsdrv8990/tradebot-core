@@ -31,6 +31,8 @@
 
 #include "tb/core/time.h"
 #include "tb/exec/backend_dex.h"
+#include "tb/exec/safe_exec.h"
+#include "tb/sign/tx.h"
 #include "tb/exec/engine.h"
 #include "tb/exec/wallet.h"
 #include "tb/ledger/ledger.h"
@@ -298,6 +300,7 @@ int main(int argc, char **argv)
     const char *ledger_path = "./arb_demo.jsonl";
     uint64_t duration_ms = 15000;
     bool replay = false;
+    bool live_exec = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
@@ -308,10 +311,12 @@ int main(int argc, char **argv)
             duration_ms = strtoull(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--replay") == 0)
             replay = true;
+        else if (strcmp(argv[i], "--live-exec") == 0)
+            live_exec = true;
         else {
             fprintf(stderr,
                     "использование: %s [--config ФАЙЛ] [--ledger ФАЙЛ] "
-                    "[--duration МС] [--replay]\n",
+                    "[--duration МС] [--replay] [--live-exec]\n",
                     argv[0]);
             return 2;
         }
@@ -388,8 +393,9 @@ int main(int argc, char **argv)
     ecfg.br_cooldown_ms = 1500;
     ecfg.backoff_base_ms = 200;
     ecfg.backoff_cap_ms = 1200;
-    ecfg.fill_poll_max = 6;
-    ecfg.fill_poll_interval_ms = 250;
+    ecfg.fill_poll_max = live_exec ? 120 : 6;          /* реальная tx:
+                                                          до 2 минут */
+    ecfg.fill_poll_interval_ms = live_exec ? 1000 : 250;
     ecfg.max_slippage_bp = 150;
     ecfg.min_deadline_ahead_ms = 200;
 
@@ -410,9 +416,22 @@ int main(int argc, char **argv)
     }
     tb_exec_attach_ledger(engine, ledger);
 
-    /* ---- виртуальный кошелёк: 5 WETH ---- */
+    /* ---- кошелёк: live — истина с цепи (balanceOf Safe), иначе 5 WETH -- */
     tb_wallet_t *wallet = (tb_wallet_t *)tb_exec_wallet(engine);
     tb_u256_t start = tb_u256_from_u64(5000000000000000000ull);
+    if (live_exec) {
+        tb_error_t berr = TB_ERROR_INIT;
+        if (tb_safe_balance_of(http, &cfg.dex.safe, &cfg.weth,
+                               &cfg.dex.safe.safe, &start, &berr) != 0) {
+            fprintf(stderr, "balanceOf(Safe): %s\n", berr.message);
+            return 1;
+        }
+        if (tb_u256_is_zero(&start)) {
+            fprintf(stderr,
+                    "live: на Safe нет WETH — пополните контракт\n");
+            return 1;
+        }
+    }
     tb_wallet_deposit(wallet, &cfg.weth, &start, &err);
 
     /* ---- цикл + мост BLOCKED->таймер ---- */
