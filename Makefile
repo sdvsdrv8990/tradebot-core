@@ -64,21 +64,24 @@ CORE_SRC := \
   src/exec/backend_sim.c \
   src/exec/engine.c
 
-RUNTIME_SRC := src/json/envelope.cpp
+RUNTIME_SRC := src/json/envelope.cpp src/json/config.cpp
 NET_SRC     := src/net/http.c
 DEX_SRC     := src/exec/backend_dex.c
+USER_SRC    := src/user/filters.c src/user/decision.c src/user/arb.c
 
 CORE_OBJ   := $(addprefix $(BUILD)/,$(CORE_SRC:.c=.o))
 RUNTIME_OBJ:= $(addprefix $(BUILD)/,$(RUNTIME_SRC:.cpp=.o))
 NET_OBJ    := $(addprefix $(BUILD)/,$(NET_SRC:.c=.o))
 DEX_OBJ    := $(addprefix $(BUILD)/,$(DEX_SRC:.c=.o))
+USER_OBJ   := $(addprefix $(BUILD)/,$(USER_SRC:.c=.o))
 DEMO_OBJ   := $(BUILD)/src/demo/bot_demo.o
 EVTDEMO_OBJ:= $(BUILD)/src/demo/events_demo.o
 EXECDEMO_OBJ:= $(BUILD)/src/demo/exec_demo.o
 
 TEST_C_BINS  := test_error test_registry test_arch test_pqueue test_timer \
         test_backoff test_runtime test_events test_ledger test_loop \
-        test_u256 test_route test_wallet test_net test_backend_dex
+        test_u256 test_route test_wallet test_net test_backend_dex \
+        test_filters test_decision test_config
 TEST_CXX_BINS:= test_envelope test_exec
 TEST_BINS    := $(TEST_C_BINS) $(TEST_CXX_BINS)
 
@@ -128,6 +131,10 @@ $(BUILD)/libtb_dex.a: $(DEX_OBJ)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
+$(BUILD)/libtb_user.a: $(USER_OBJ)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
 $(BUILD)/bot_demo: $(DEMO_OBJ) $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $(DEMO_OBJ) $(BUILD)/libtb_runtime.a $(BUILD)/libtb_core.a $(LDFLAGS)
@@ -156,6 +163,18 @@ $(BUILD)/tests/test_net: tests/test_net.c $(BUILD)/libtb_core.a $(BUILD)/libtb_n
 $(BUILD)/tests/test_backend_dex: tests/test_backend_dex.c $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+
+$(BUILD)/tests/test_filters: tests/test_filters.c $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+
+$(BUILD)/tests/test_decision: tests/test_decision.c $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+
+$(BUILD)/tests/test_config: tests/test_config.c $(BUILD)/libtb_runtime.a $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_runtime.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
 
 $(BUILD)/tests/test_%: tests/test_%.c $(BUILD)/libtb_core.a
 	@mkdir -p $(dir $@)

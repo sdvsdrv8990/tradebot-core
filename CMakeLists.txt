@@ -102,10 +102,22 @@ target_include_directories(tb_dex PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(tb_dex PUBLIC tb_net tb_core)
 
 # ---------------------------------------------------------------------------
+#  tb_user — USER-домен: фильтры 1–4, Decision Engine, рантайм арбитража
+# ---------------------------------------------------------------------------
+add_library(tb_user STATIC
+  src/user/filters.c
+  src/user/decision.c
+  src/user/arb.c
+)
+target_include_directories(tb_user PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(tb_user PUBLIC tb_dex tb_net tb_core)
+
+# ---------------------------------------------------------------------------
 #  tb_runtime — C++20-обвязка (готовый rapidjson вендорится в third_party)
 # ---------------------------------------------------------------------------
 add_library(tb_runtime STATIC
   src/json/envelope.cpp
+  src/json/config.cpp
 )
 target_include_directories(tb_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -153,6 +165,9 @@ set(TB_C_TESTS
   test_wallet
   test_net
   test_backend_dex
+  test_filters
+  test_decision
+  test_config
 )
 foreach(name IN LISTS TB_C_TESTS)
   add_executable(${name} tests/${name}.c)
@@ -162,6 +177,9 @@ foreach(name IN LISTS TB_C_TESTS)
 endforeach()
 target_link_libraries(test_net PRIVATE tb_net)
 target_link_libraries(test_backend_dex PRIVATE tb_dex)
+target_link_libraries(test_filters PRIVATE tb_user)
+target_link_libraries(test_decision PRIVATE tb_user)
+target_link_libraries(test_config PRIVATE tb_runtime)
 
 add_executable(test_envelope tests/test_envelope.cpp)
 target_link_libraries(test_envelope PRIVATE tb_runtime)

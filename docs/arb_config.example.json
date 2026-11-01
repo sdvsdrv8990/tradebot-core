@@ -1,0 +1,49 @@
+{
+  "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+
+  "rpc": [
+    {
+      "name": "uniswap-v3",
+      "url": "https://ethereum-rpc.publicnode.com",
+      "quoter": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
+      "pools": [
+        "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+        "0x8ad599c3A0fF1De082011EFDDc58f1908eb6e6D8",
+        "0x11b815efB8f581194ae79006d24E0d814B7697F6"
+      ]
+    }
+  ],
+
+  "pools": [
+    { "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "pool": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+      "fee": 500, "dex": "uniswap-v3" },
+    { "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "pool": "0x8ad599c3A0fF1De082011EFDDc58f1908eb6e6D8",
+      "fee": 3000, "dex": "uniswap-v3" },
+    { "token": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+      "pool": "0x11b815efB8f581194ae79006d24E0d814B7697F6",
+      "fee": 500, "dex": "uniswap-v3" }
+  ],
+
+  "filters": {
+    "freshness_ms": 15000,
+    "impact_bp": 100,
+    "volatility_bp": 300,
+    "probe_mult": 10,
+    "dex_allow": ["uniswap-v3", "pancakeswap-v3", "sushiswap-v3"]
+  },
+
+  "decision": {
+    "poll_ms": 8000,
+    "probe_wei": "100000000000000",
+    "min_trade_wei": "100000000000000",
+    "max_trade_wei": "10000000000000000",
+    "min_profit_wei": "10000000000000",
+    "gas_est_wei": "200000000000000",
+    "deadline_ms": 8000,
+    "max_pairs": 1,
+    "fill_delay_min_ms": 300,
+    "fill_delay_max_ms": 900
+  }
+}
