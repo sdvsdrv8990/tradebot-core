@@ -1,12 +1,14 @@
 #define TB_CURRENT_GROUP TB_G_ARB /* зона ответственности файла */
 
 /* ==========================================================================
- *  tb/user/webui.c — веб-морда: дашборд + JSON API на 127.0.0.1.
+ *  tb/user/webui.c — веб-морда: страницы-микромодули + JSON API (v0.5).
  *
- *  Гонок нет по построению: поток сервера читает только (а) снапшот
- *  статуса под мьютексом, (б) файл журнала собственным read-only fd
- *  (append-only JSONL; частичная последняя строка отбрасывается).
- *  К памяти приложения сервер не прикасается.
+ *  Микромодульность: страница = {путь, заголовок, JS}, регистрируется
+ *  приложением (какие — решает конфиг). Оболочка (тема, навигация,
+ *  автообновление) одна; JS страницы сам фетчит свой /api/<имя> и
+ *  рисует таблицу в #page. Данные в морде не живут: именованные
+ *  снапшоты кладёт приложение из потока цикла (мьютекс), журнал читаем
+ *  собственным read-only fd — гонок с ботом нет по построению.
  * ========================================================================== */
 #include "tb/user/webui.h"
 #include "tb/arch/arch.h"
@@ -20,27 +22,41 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define WEBUI_SNAPSHOT_MAX 4096
-#define WEBUI_LEDGER_TAIL  (64 * 1024)
+#define WEBUI_SNAP_MAX   (8 * 1024)
+#define WEBUI_PAGE_MAX   (32 * 1024)
+#define WEBUI_LEDGER_TAIL (64 * 1024)
+
+typedef struct {
+    char name[16];
+    char json[WEBUI_SNAP_MAX];
+} snap_ent_t;
 
 typedef struct tb_webui {
     int          fd;
     uint16_t     port;
     pthread_t    th;
     volatile bool stop;
-    pthread_mutex_t lock;
-    char         snapshot[WEBUI_SNAPSHOT_MAX]; /* JSON статуса */
+    pthread_mutex_t lock;      /* snaps + pages */
+    snap_ent_t   snaps[TB_WEBUI_SNAPS_MAX];
+    uint32_t     snaps_n;
+    tb_web_page_t pages[TB_WEBUI_PAGES_MAX];
+    uint32_t     pages_n;
     char         ledger_path[512];
 } tb_webui_t;
 
-/* ---- дашборд (одна страница, без зависимостей) ---- */
+/* ---- HTML-оболочка (тема + навигация + автообновление) ---- */
 
-static const char PAGE[] =
+static const char SHELL_HEAD[] =
     "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
     "<title>tradebot-core</title><style>"
     ":root{color-scheme:dark}body{font:14px/1.45 system-ui,sans-serif;"
-    "background:#111318;color:#d7dce3;margin:24px}"
-    "h1{font-size:18px;margin:0 0 4px}.sub{color:#7b8494;font-size:12px}"
+    "background:#111318;color:#d7dce3;margin:0 0 40px}"
+    ".wrap{max-width:1100px;margin:0 auto;padding:0 24px}"
+    "h1{font-size:18px;margin:18px 0 2px}.sub{color:#7b8494;font-size:12px}"
+    "nav{display:flex;gap:4px;margin:14px 0 4px;border-bottom:1px solid "
+    "#262c37;padding-bottom:8px;flex-wrap:wrap}"
+    "nav a{color:#9aa4b2;text-decoration:none;font-size:13px;padding:4px 12px;"
+    "border-radius:6px}nav a.on{background:#1a1e26;color:#e8ecf1}"
     ".cards{display:flex;flex-wrap:wrap;gap:10px;margin:16px 0}"
     ".card{background:#1a1e26;border:1px solid #262c37;border-radius:8px;"
     "padding:10px 14px;min-width:110px}"
@@ -55,50 +71,51 @@ static const char PAGE[] =
     ".tag{display:inline-block;padding:1px 7px;border-radius:10px;"
     "font-size:11px}.t-ok{background:#1d3a2f;color:#5dd39e}"
     ".t-err{background:#3a241f;color:#e07a5f}.t-pend{background:#33301d;"
-    "color:#d9b45a}"
-    "</style></head><body>"
+    "color:#d9b45a}.mut{color:#7b8494}"
+    "</style></head><body><div class=\"wrap\">"
     "<h1>tradebot-core</h1><div class=\"sub\" id=\"mode\">…</div>"
-    "<div class=\"cards\" id=\"cards\"></div>"
-    "<h2>Последние решения и сделки</h2>"
-    "<table><thead><tr><th>время</th><th>тип</th><th>детали</th>"
-    "</tr></thead><tbody id=\"rows\"></tbody></table>"
-    "<script>"
+    "<nav id=\"nav\"></nav><div id=\"page\"></div></div><script>";
+
+/* Общие JS-хелперы для всех страниц. */
+static const char SHELL_JS[] =
     "const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;',"
     "'<':'&lt;','>':'&gt;'}[c]));"
-    "function fmt(t){return new Date(t).toLocaleTimeString('ru-RU')}"
-    "async function tick(){"
-    "try{"
-    "const st=await (await fetch('/api/status')).json();"
-    "document.getElementById('mode').textContent="
-    "esc(st.mode||'')+' · аптайм '+Math.round((st.uptime_ms||0)/1000)+'с';"
-    "const c=document.getElementById('cards');"
-    "c.innerHTML=(st.cards||[]).map(k=>'<div class=\"card'+(k.cls?' '+k.cls:"
-    "'')+'\"><b>'+esc(k.v)+'</b><span>'+esc(k.t)+'</span></div>').join('');"
-    "}catch(e){}"
-    "try{"
-    "const lg=await (await fetch('/api/ledger')).json();"
-    "const rows=(lg.records||[]).slice(-40).reverse().map(r=>{"
-    "let d='';const t=r.type||'',p=r.payload||{};"
-    "if(t.indexOf('decision.evaluated')===0){"
-    "const ps=p.pairs||[];d='пар '+ps.length+'; выгодных '+"
-    "ps.filter(x=>x.ok).length;}"
-    "else if(t.indexOf('decision.submitted')===0){"
-    "d='event '+(p.event_id||'?')+' · размер '+String(p.size||'')+' wei';}"
-    "else if(t.indexOf('decision.canceled')===0){d=p.reason||'';}"
-    "else if(t.indexOf('trade.')===0){"
-    "const dt=p.data||{};"
-    "d=(dt.amount_in?('вход '+String(dt.amount_in).slice(0,10)+'… · '):'')"
-    "+(p.operation||'')+((p.error&&p.error.message)?(' · '+p.error.message):'');}"
-    "const cls=t.indexOf('trade.executed')===0?'t-ok':"
-    "(t.indexOf('trade.failed')===0?'t-err':"
-    "(t.indexOf('trade.submitted')===0?'t-pend':''));"
-    "return '<tr><td>'+fmt(r.ts_ms||0)+'</td><td>'+(cls?('<span "
-    "class=\"tag '+cls+'\">'):'')+esc(t)+(cls?'</span>':'')+'</td><td>'"
-    "+esc(d)+'</td></tr>';}).join('');"
-"document.getElementById('rows').innerHTML=rows;"
-    "}catch(e){}}"
-    "tick();setInterval(tick,2000);"
-    "</script></body></html>";
+    "const fmt=t=>new Date(t).toLocaleTimeString('ru-RU');"
+    "const short=s=>{s=String(s||'');return s.length>12?s.slice(0,8)+'…'"
+    "+s.slice(-4):s};"
+    "const bp=n=>((n>0?'+':'')+ (Number(n)/100).toFixed(2)+'%');"
+    "const big=s=>{try{return BigInt(s||0)}catch(e){return 0n}};"
+    "const eth=w=>{const v=big(w),s=v<0n?-v:v,d=(v<0n?'-':'')+"
+    "(s/10n**10n).toString().padStart(11,'0');"
+    "return d.slice(0,-8)+'.'+d.slice(-8)};";
+
+/* Собрать страницу: оболочка + навигация (активная подсвечена) + JS. */
+static size_t build_page(tb_webui_t *w, char *out, size_t cap, uint32_t pi)
+{
+    size_t o = (size_t)snprintf(out, cap, "%s", SHELL_HEAD);
+    o += (size_t)snprintf(out + o, cap - o, "%s", SHELL_JS);
+
+    pthread_mutex_lock(&w->lock);
+    o += (size_t)snprintf(out + o, cap - o,
+                          "const NAV=[");
+    for (uint32_t i = 0; i < w->pages_n; i++)
+        o += (size_t)snprintf(out + o, cap - o,
+                              "%s{p:\"%s\",t:\"%s\"}",
+                              i ? "," : "", w->pages[i].path,
+                              w->pages[i].title);
+    o += (size_t)snprintf(out + o, cap - o, "];const ACT=%u;", pi);
+    const char *js = w->pages[pi].js;
+    pthread_mutex_unlock(&w->lock);
+
+    o += (size_t)snprintf(out + o, cap - o,
+        "document.getElementById('nav').innerHTML=NAV.map((n,i)=>"
+        "'<a href=\"'+n.p+'\" class=\"'+(i===ACT?'on':'')+'\">'+n.t+'</a>')"
+        ".join('');");
+    o += (size_t)snprintf(out + o, cap - o, "%s", js);
+    o += (size_t)snprintf(out + o, cap - o,
+        "tick();setInterval(tick,2000);</script></body></html>");
+    return o;
+}
 
 /* ---- HTTP-ответы ---- */
 
@@ -127,20 +144,38 @@ static void respond(int c, const char *ctype, const char *body,
     send_all(c, body, body_len);
 }
 
-static void respond_status_json(tb_webui_t *w, int c)
+static void respond_404(int c)
 {
-    char snap[WEBUI_SNAPSHOT_MAX];
+    static const char nf[] = "HTTP/1.1 404 Not Found\r\n"
+                             "Content-Length: 0\r\nConnection: close"
+                             "\r\n\r\n";
+    send_all(c, nf, sizeof(nf) - 1);
+}
+
+static void respond_named(tb_webui_t *w, int c, const char *name)
+{
+    char snap[WEBUI_SNAP_MAX];
+    snap[0] = '\0';
     pthread_mutex_lock(&w->lock);
-    memcpy(snap, w->snapshot, sizeof(snap));
+    for (uint32_t i = 0; i < w->snaps_n; i++)
+        if (strcmp(w->snaps[i].name, name) == 0) {
+            memcpy(snap, w->snaps[i].json, sizeof(snap));
+            break;
+        }
     pthread_mutex_unlock(&w->lock);
     if (!snap[0])
-        strcpy(snap, "{\"cards\":[],\"mode\":\"запуск…\"}");
+        snprintf(snap, sizeof(snap), "{\"_\":\"нет данных: %s\"}", name);
     respond(c, "application/json", snap, strlen(snap));
 }
 
-/* Хвост журнала: последние строки JSONL как массив объектов. */
-static void respond_ledger(tb_webui_t *w, int c)
+/* Хвост журнала: последние строки JSONL как массив объектов.
+ * prefix != NULL — только записи с "type":"<prefix>…". */
+static void respond_ledger(tb_webui_t *w, int c, const char *prefix)
 {
+    char pat[40] = "";
+    if (prefix)
+        snprintf(pat, sizeof(pat), "\"type\":\"%s", prefix);
+
     FILE *f = fopen(w->ledger_path, "rb");
     if (!f) {
         respond(c, "application/json", "{\"records\":[]}", 15);
@@ -172,10 +207,12 @@ static void respond_ledger(tb_webui_t *w, int c)
             line[--ll] = '\0';
         if (ll < 2 || line[ll - 1] != '}')
             continue; /* оборванная строка */
+        if (pat[0] && !strstr(line, pat))
+            continue; /* не нужный тип записи */
         if (o + ll + 4 >= sizeof(out))
             break;
-        o += (size_t)snprintf(out + o, sizeof(out) - o, "%s%s", first ? "" : ",",
-                              line);
+        o += (size_t)snprintf(out + o, sizeof(out) - o, "%s%s",
+                              first ? "" : ",", line);
         first = 0;
     }
     snprintf(out + o, sizeof(out) - o, "]}");
@@ -194,19 +231,46 @@ static void serve_client(tb_webui_t *w, int c)
         if (strstr(req, "\r\n\r\n"))
             break;
     }
-    if (strncmp(req, "GET /api/status", 15) == 0)
-        respond_status_json(w, c);
-    else if (strncmp(req, "GET /api/ledger", 15) == 0)
-        respond_ledger(w, c);
-    else if (strncmp(req, "GET / ", 6) == 0
-             || strncmp(req, "GET /index.html", 15) == 0)
-        respond(c, "text/html; charset=utf-8", PAGE, sizeof(PAGE) - 1);
-    else {
-        static const char nf[] = "HTTP/1.1 404 Not Found\r\n"
-                                 "Content-Length: 0\r\nConnection: close"
-                                 "\r\n\r\n";
-        send_all(c, nf, sizeof(nf) - 1);
+    if (strncmp(req, "GET ", 4) != 0) {
+        respond_404(c);
+        return;
     }
+    char path[64] = {0};
+    for (size_t i = 0; i < sizeof(path) - 1 && req[4 + i] != ' '; i++)
+        path[i] = req[4 + i];
+
+    if (strncmp(path, "/api/", 5) == 0) {
+        const char *name = path + 5;
+        if (strcmp(name, "status") == 0)
+            respond_named(w, c, "status");
+        else if (strcmp(name, "ledger") == 0)
+            respond_ledger(w, c, NULL);
+        else if (strcmp(name, "trades") == 0)
+            respond_ledger(w, c, "trade.");
+        else
+            respond_named(w, c, name);
+        return;
+    }
+
+    /* HTML-страницы */
+    uint32_t pi = UINT32_MAX;
+    pthread_mutex_lock(&w->lock);
+    for (uint32_t i = 0; i < w->pages_n; i++) {
+        const char *p = w->pages[i].path;
+        if (strcmp(path, p) == 0
+            || (strcmp(p, "/") == 0 && strcmp(path, "/index.html") == 0)) {
+            pi = i;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&w->lock);
+    if (pi == UINT32_MAX) {
+        respond_404(c);
+        return;
+    }
+    static char page[WEBUI_PAGE_MAX];
+    size_t n = build_page(w, page, sizeof(page), pi);
+    respond(c, "text/html; charset=utf-8", page, n);
 }
 
 static void *web_thread(void *arg)
@@ -281,13 +345,46 @@ int tb_webui_start(tb_webui_t **out, uint16_t want_port,
     return 0;
 }
 
+int tb_webui_page_add(tb_webui_t *w, const tb_web_page_t *page)
+{
+    if (!w || !page || !page->path || !page->js)
+        return -1;
+    int rc = -1;
+    pthread_mutex_lock(&w->lock);
+    if (w->pages_n < TB_WEBUI_PAGES_MAX) {
+        w->pages[w->pages_n++] = *page; /* строки статические — shallow ok */
+        rc = 0;
+    }
+    pthread_mutex_unlock(&w->lock);
+    return rc;
+}
+
+int tb_webui_set_named(tb_webui_t *w, const char *name, const char *json)
+{
+    if (!w || !name || !json || strlen(name) >= sizeof(w->snaps[0].name))
+        return -1;
+    int rc = -1;
+    pthread_mutex_lock(&w->lock);
+    snap_ent_t *e = NULL;
+    for (uint32_t i = 0; i < w->snaps_n; i++)
+        if (strcmp(w->snaps[i].name, name) == 0)
+            e = &w->snaps[i];
+    if (!e && w->snaps_n < TB_WEBUI_SNAPS_MAX) {
+        e = &w->snaps[w->snaps_n++];
+        snprintf(e->name, sizeof(e->name), "%s", name);
+    }
+    if (e) {
+        snprintf(e->json, sizeof(e->json), "%s", json);
+        rc = 0;
+    }
+    pthread_mutex_unlock(&w->lock);
+    return rc;
+}
+
 void tb_webui_set_json(tb_webui_t *w, const char *json)
 {
-    if (!w || !json)
-        return;
-    pthread_mutex_lock(&w->lock);
-    snprintf(w->snapshot, sizeof(w->snapshot), "%s", json);
-    pthread_mutex_unlock(&w->lock);
+    if (w && json)
+        (void)tb_webui_set_named(w, "status", json);
 }
 
 uint16_t tb_webui_port(const tb_webui_t *w)

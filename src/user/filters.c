@@ -21,7 +21,7 @@
 
 /* Деление a/b в б.п.: (a*10000)/b, пока b не влезает в u64 — сдвигаем
  * оба вправо на 64 бита (точность целых б.п. достаточна). */
-static bool ratio_bp(const tb_u256_t *a, const tb_u256_t *b, uint32_t *out_bp)
+bool tb_arb_ratio_bp(const tb_u256_t *a, const tb_u256_t *b, uint32_t *out_bp)
 {
     tb_u256_t num = *a, den = *b;
     if (tb_u256_is_zero(&den))
@@ -61,7 +61,7 @@ static bool snap_impact_bp(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *s,
     }
     if (!tb_u256_sub(&diff, &small_scaled, &s->big_out))
         return false;
-    return ratio_bp(&diff, &small_scaled, out_bp);
+    return tb_arb_ratio_bp(&diff, &small_scaled, out_bp);
 }
 
 static bool hist_vol_bp(const tb_arb_hist_t *h, uint32_t *out_bp)
@@ -94,7 +94,7 @@ static bool hist_vol_bp(const tb_arb_hist_t *h, uint32_t *out_bp)
             max_dev = dev;
     }
 
-    return ratio_bp(&max_dev, &mean, out_bp);
+    return tb_arb_ratio_bp(&max_dev, &mean, out_bp);
 }
 
 int tb_arb_filter_eval(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *s,

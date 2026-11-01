@@ -255,6 +255,28 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
     out->dex.fill_delay_min_ms = (uint32_t)fmin;
     out->dex.fill_delay_max_ms = (uint32_t)fmax;
 
+    /* web: {port, refresh_ms, pages[]} — какие страницы-микромодули подняты */
+    auto web = doc.FindMember("web");
+    if (web != doc.MemberEnd() && web->value.IsObject()) {
+        const auto &v = web->value;
+        uint64_t port = 0, refr = 0;
+        if (!u64_field(v, "port", &port) || !u64_field(v, "refresh_ms", &refr))
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: web числа");
+        out->web.port = (uint16_t)port;
+        out->web.refresh_ms = (uint32_t)refr;
+        auto ps = v.FindMember("pages");
+        if (ps != v.MemberEnd() && ps->value.IsArray()) {
+            for (auto &p : ps->value.GetArray()) {
+                if (!p.IsString() || out->web.pages_n >= TB_ARB_WEB_PAGES_MAX)
+                    continue;
+                snprintf(out->web.pages[out->web.pages_n],
+                         sizeof(out->web.pages[0]), "%s", p.GetString());
+                out->web.pages_n++;
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -287,4 +309,16 @@ extern "C" void tb_arb_defaults(tb_arb_cfg_t *cfg)
         cfg->deadline_ms = 8000;
     if (cfg->max_pairs_per_poll == 0)
         cfg->max_pairs_per_poll = 1;
+
+    /* веб: дефолты страницы; 0 -> все стандартные */
+    if (cfg->web.port == 0)
+        cfg->web.port = 8080;
+    if (cfg->web.refresh_ms == 0)
+        cfg->web.refresh_ms = 2000;
+    if (cfg->web.pages_n == 0) {
+        const char *std[] = {"dashboard", "venues", "trades"};
+        for (const char *s : std)
+            snprintf(cfg->web.pages[cfg->web.pages_n++],
+                     sizeof(cfg->web.pages[0]), "%s", s);
+    }
 }

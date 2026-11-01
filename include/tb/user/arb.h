@@ -36,7 +36,17 @@ struct tb_loop;
 #define TB_ARB_MAX_POOLS   16
 #define TB_ARB_HISTORY_LEN 8
 
-/* ---- Конфигурация ---- */
+/* ---- Веб-морда: подключаемые страницы-микромодули ----
+ * Конфиг — единый источник истины: какие страницы подняты, порт и
+ * период обновления. Имена: dashboard | venues | trades. */
+#define TB_ARB_WEB_PAGES_MAX 8
+
+typedef struct tb_arb_web_cfg {
+    uint16_t port;        /* 0 -> 8080 */
+    uint32_t refresh_ms;  /* 0 -> 2000 */
+    char     pages[TB_ARB_WEB_PAGES_MAX][24];
+    uint32_t pages_n;     /* 0 -> все стандартные */
+} tb_arb_web_cfg_t;
 
 typedef struct tb_arb_pool {
     tb_addr_t token;  /* второй токен пары (первый — WETH) */
@@ -74,6 +84,8 @@ typedef struct tb_arb_cfg {
 
     tb_arb_pool_t pools[TB_ARB_MAX_POOLS];
     uint32_t      pools_n;
+
+    tb_arb_web_cfg_t web; /* раздел "web" конфига */
 } tb_arb_cfg_t;
 
 /* Загрузка из JSON (реализация — src/json/config.cpp, rapidjson).
@@ -198,6 +210,20 @@ const tb_arb_stats_t *tb_arb_stats(const tb_arb_t *a);
 
 /* Статистика RPC цитировщика модуля: реальные eth_call к QuoterV2. */
 const tb_exec_dex_stats_t *tb_arb_quote_stats(const tb_arb_t *a);
+
+/* ---- Данные для веб-страниц (контракт: читать ТОЛЬКО из потока цикла,
+ * как и всё в tb_arb; страницы собирает задача обновления в цикле) ---- */
+size_t             tb_arb_pools_n(const tb_arb_t *a);
+const tb_arb_pool_t *tb_arb_pool(const tb_arb_t *a, size_t i);
+/* Последняя котировка пула i (копия из решённого батча); NULL — ещё не
+ * котировался или меньше i пулов. */
+const tb_arb_snap_t *tb_arb_last_snap(const tb_arb_t *a, size_t i);
+uint64_t           tb_arb_probe_wei(const tb_arb_t *a);
+
+/* a/b в базисных пунктах: (a*10000)/b; ложь при b==0/данных безумия.
+ * Тот же алгоритм, что в фильтре ликвидности. */
+bool tb_arb_ratio_bp(const tb_u256_t *a, const tb_u256_t *b,
+                     uint32_t *out_bp);
 
 #ifdef __cplusplus
 }

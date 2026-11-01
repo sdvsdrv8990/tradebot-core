@@ -48,11 +48,17 @@ typedef struct tb_arb {
 
     tb_arb_hist_t        hist[TB_ARB_MAX_POOLS];
 
+    /* последний решённый батч котировок — для веб-страниц (пишет и читает
+     * только поток цикла); копия делается в decide_done до free батча */
+    tb_arb_snap_t        last_snaps[TB_ARB_MAX_POOLS];
+    size_t               last_n;
+    uint64_t             last_seq;
+
     struct pending_ent {
         uint64_t   event_id;
-        tb_u256_t  size;    /* вход ордера — размер перекотировки */
-        tb_u256_t  min_out; /* безубыток */
-        tb_route_t route;   /* цикл: покупка + продажа */
+        tb_u256_t  size;     /* вход ордера — размер перекотировки */
+        tb_u256_t  min_out;  /* безубыток */
+        tb_route_t route;    /* цикл: покупка + продажа */
     } pending[TB_ARB_MAX_PENDING];
     size_t pending_n;
 } tb_arb_t;
@@ -318,6 +324,14 @@ static void decide_done(tb_loop_t *loop, void *arg)
     (void)loop;
     decide_job_t *d = arg;
     tb_arb_t *a = d->a;
+
+    /* веб-страницы: сохранить последние котировки до освобождения батча */
+    if (d->batch->seq > a->last_seq) {
+        memcpy(a->last_snaps, d->batch->snaps,
+               sizeof(tb_arb_snap_t) * d->batch->n);
+        a->last_n = d->batch->n;
+        a->last_seq = d->batch->seq;
+    }
 
     emit_evaluated(a, d->batch, d);
 
@@ -660,4 +674,30 @@ const tb_arb_stats_t *tb_arb_stats(const tb_arb_t *a)
 const tb_exec_dex_stats_t *tb_arb_quote_stats(const tb_arb_t *a)
 {
     return a ? tb_exec_dex_stats(&a->dexb) : NULL;
+}
+
+/* ---- данные для веб-страниц: только из потока цикла ---- */
+
+size_t tb_arb_pools_n(const tb_arb_t *a)
+{
+    return a ? a->cfg.pools_n : 0;
+}
+
+const tb_arb_pool_t *tb_arb_pool(const tb_arb_t *a, size_t i)
+{
+    if (!a || i >= a->cfg.pools_n)
+        return NULL;
+    return &a->cfg.pools[i];
+}
+
+const tb_arb_snap_t *tb_arb_last_snap(const tb_arb_t *a, size_t i)
+{
+    if (!a || i >= a->last_n)
+        return NULL;
+    return &a->last_snaps[i];
+}
+
+uint64_t tb_arb_probe_wei(const tb_arb_t *a)
+{
+    return a ? a->cfg.probe_wei : 0;
 }

@@ -260,6 +260,247 @@ static void stop_task(tb_loop_t *loop, tb_task_t *task, void *arg)
     tb_loop_stop(loop);
 }
 
+/* ---- Страницы-микромодули (JS фетчит свой api и рисует в #page;
+ * оболочка/навигация/автообновление — в webui). Список поднятых
+ * страниц управляется конфигом: web.pages. ---- */
+
+#define WEBUI_MARKET_JSON_MAX (8 * 1024)
+
+static const char DASH_JS[] =
+    "document.getElementById('page').innerHTML="
+    "'<div class=\"cards\" id=\"cards\"></div>'"
+    "+'<h2>Последние решения и сделки</h2>'"
+    "+'<table><thead><tr><th>время</th><th>тип</th><th>детали</th></tr>"
+    "</thead><tbody id=\"rows\"></tbody></table>';"
+    "async function tick(){try{"
+    "const st=await (await fetch('/api/status')).json();"
+    "document.getElementById('mode').textContent="
+    "esc(st.mode||'')+' · аптайм '+Math.round((st.uptime_ms||0)/1000)+'с';"
+    "document.getElementById('cards').innerHTML=(st.cards||[]).map(k=>"
+    "'<div class=\"card'+(k.cls?' '+k.cls:'')+'\"><b>'+esc(k.v)+'</b>"
+    "<span>'+esc(k.t)+'</span></div>').join('');"
+    "}catch(e){}"
+    "try{"
+    "const lg=await (await fetch('/api/ledger')).json();"
+    "const rows=(lg.records||[]).slice(-40).reverse().map(r=>{"
+    "let d='';const t=r.type||'',p=r.payload||{};"
+    "if(t.indexOf('decision.evaluated')===0){"
+    "const ps=p.pairs||[];d='пар '+ps.length+'; выгодных '+"
+    "ps.filter(x=>x.ok).length;}"
+    "else if(t.indexOf('decision.submitted')===0){"
+    "d='event '+(p.event_id||'?')+' · размер '+String(p.size||'')+' wei';}"
+    "else if(t.indexOf('decision.canceled')===0){d=p.reason||'';}"
+    "else if(t.indexOf('trade.')===0){"
+    "const dt=p.data||{};"
+    "d=(dt.amount_in?('вход '+String(dt.amount_in).slice(0,10)+'… · '):'')"
+    "+(p.operation||'')+((p.error&&p.error.message)?(' · '+p.error.message):'');}"
+    "const cls=t.indexOf('trade.executed')===0?'t-ok':"
+    "(t.indexOf('trade.failed')===0?'t-err':"
+    "(t.indexOf('trade.submitted')===0?'t-pend':''));"
+    "return '<tr><td>'+fmt(r.ts_ms||0)+'</td><td>'+(cls?('<span "
+    "class=\"tag '+cls+'\">'):'')+esc(t)+(cls?'</span>':'')+'</td><td>'"
+    "+esc(d)+'</td></tr>';}).join('');"
+    "document.getElementById('rows').innerHTML=rows;"
+    "}catch(e){}}";
+
+static const char VENUES_JS[] =
+    "async function tick(){try{"
+    "const m=await (await fetch('/api/market')).json();"
+    "document.getElementById('mode').textContent='биржи и цены · '+"
+    "((m.venues||[]).length)+' бирж · проба '+eth(m.probe_wei)+' ETH';"
+    "let h='<h2>Пары по выгодности (сверху лучшие)</h2>"
+    "<table><thead><tr><th>токен</th><th>покупка</th><th>продажа</th>"
+    "<th>спред</th><th>профит/пробу ETH</th></tr></thead><tbody>';"
+    "h+=(m.pairs||[]).map(p=>'<tr><td>'+short(p.token)+'</td><td>'"
+    "+esc(p.buy)+'</td><td>'+esc(p.sell)+'</td>'"
+    "+'<td style=\"color:'+(p.spread_bp>0?'#5dd39e':'#7b8494')+'\">'"
+    "+bp(p.spread_bp)+'</td><td>'+eth(p.profit_wei)+'</td></tr>').join('');"
+    "h+='</tbody></table>';"
+    "h+='<h2>Пулы под наблюдением</h2>"
+    "<table><thead><tr><th>биржа</th><th>пул</th><th>fee</th>"
+    "<th>TOKEN за пробу</th><th>круг туда-обратно</th><th>свежесть</th>"
+    "</tr></thead><tbody>';"
+    "h+=(m.venues||[]).flatMap(v=>(v.pools||[]).map(pl=>'<tr><td>'"
+    "+esc(v.name)+'</td><td title=\"'+esc(pl.pool)+'\">'+short(pl.pool)"
+    "+'</td><td>'+esc(pl.fee)+'</td><td class=\"mut\">'+short(pl.buy_out)"
+    "+'</td><td>'+bp(pl.round_bp-10000)+'</td><td>'+(pl.fresh?'свежая':"
+    "'<span class=\"tag t-err\">устарела</span>')+'</td></tr>')).join('');"
+    "h+='</tbody></table>';"
+    "document.getElementById('page').innerHTML=h;"
+    "}catch(e){document.getElementById('page').innerHTML="
+    "'<h2>котировок ещё нет</h2>';}}";
+
+static const char TRADES_JS[] =
+    "async function tick(){try{"
+    "const lg=await (await fetch('/api/trades')).json();"
+    "const rows=(lg.records||[]).slice(-100).reverse().map(r=>{"
+    "const t=r.type||'',p=r.payload||{},dt=p.data||{};"
+    "let tag='',st=t;"
+    "if(t.indexOf('trade.executed')===0){tag='t-ok';st='filled'}"
+    "else if(t.indexOf('trade.failed')===0){tag='t-err';st='failed'}"
+    "else if(t.indexOf('trade.canceled')===0){tag='t-err';st='canceled'}"
+    "else if(t.indexOf('trade.submitted')===0){tag='t-pend';st='pending'}"
+    "let prof='';"
+    "if(dt.amount_in&&dt.amount_out){const d=big(dt.amount_out)"
+    "-big(dt.amount_in);prof=(d>=0n?'+':'')+eth(d.toString())}"
+    "const errm=(p.error&&p.error.message)?esc(p.error.message):'';"
+    "return '<tr><td>'+fmt(r.ts_ms||0)+'</td><td>'+(tag?('<span "
+    "class=\"tag '+tag+'\">'):'')+st+(tag?'</span>':'')+'</td><td>'"
+    "+short(dt.token_in)+'</td><td>'+eth(dt.amount_in)+'</td><td>'"
+    "+eth(dt.amount_out)+'</td><td>'+prof+'</td><td class=\"mut\">'"
+    "+short(String(dt.order||''))+'</td><td class=\"mut\">'+errm"
+    "+'</td></tr>';}).join('');"
+    "document.getElementById('mode').textContent='сделки · всего '"
+    "+(lg.records||[]).length;"
+    "document.getElementById('page').innerHTML="
+    "'<table><thead><tr><th>время</th><th>статус</th><th>маршрут</th>"
+    "<th>вход ETH</th><th>выход ETH</th><th>профит ETH</th><th>ордер</th>"
+    "<th>ошибка</th></tr></thead><tbody>'+rows+'</tbody></table>';"
+    "}catch(e){}}";
+
+static const tb_web_page_t WEB_PAGES[] = {
+    {"dashboard", "/", "Дашборд", DASH_JS},
+    {"venues", "/venues", "Биржи и цены", VENUES_JS},
+    {"trades", "/trades", "Сделки", TRADES_JS},
+};
+
+/* Снимок рынка для страницы «Биржи и цены»: последние котировки пулов
+ * + спреды пар (та же арифметика б.п., что в фильтрах; сортировка по
+ * выгоде — сверху лучшие). Данные — из tb_arb (единый источник). */
+/* Безопасное добавление в буфер: snprintf возвращает желаемую длину —
+ * слепое o += уходит за cap и портит стек; зажимаем и ставим NUL. */
+#define MK_APPEND(...) do {                                            \
+        if (o + 1 < cap) {                                             \
+            int _n = snprintf(out + o, cap - o, __VA_ARGS__);          \
+            if (_n > 0)                                                \
+                o += (size_t)_n;                                       \
+        }                                                              \
+        if (o + 1 >= cap) {                                            \
+            o = cap - 1;                                               \
+            out[o] = '\\0';                                           \
+        }                                                              \
+    } while (0)
+
+static void web_build_market(app_t *d, char *out, size_t cap)
+{
+    const tb_arb_t *a = d->arb;
+    size_t n = tb_arb_pools_n(a);
+    uint64_t now = tb_now_ms();
+    uint64_t probe = tb_arb_probe_wei(a);
+
+    uint32_t fmax = d->cfg->freshness_max_ms;
+    if (!fmax)
+        fmax = d->cfg->poll_ms ? 3 * (uint32_t)d->cfg->poll_ms : 24000;
+
+    char probe_s[80];
+    tb_u256_t pv = tb_u256_from_u64(probe);
+    tb_u256_to_dec(&pv, probe_s, sizeof(probe_s));
+
+    struct pair_ent {
+        uint32_t bi, si;
+        uint32_t bp;
+        uint64_t prof;
+    };
+    struct pair_ent pairs[TB_ARB_MAX_POOLS * TB_ARB_MAX_POOLS];
+    size_t pairs_n = 0;
+
+    size_t o = 0;
+    MK_APPEND("{\"probe_wei\":\"%s\",\"venues\":[", probe_s);
+
+    char venues[TB_DEX_MAX_VENUES][TB_DEX_NAME_MAX];
+    size_t venues_n = 0;
+    for (size_t i = 0; i < n; i++) {
+        const tb_arb_snap_t *s = tb_arb_last_snap(a, i);
+        if (!s)
+            continue;
+        size_t k = 0;
+        for (; k < venues_n; k++)
+            if (strcmp(venues[k], s->dex) == 0)
+                break;
+        if (k == venues_n && venues_n < TB_DEX_MAX_VENUES) {
+            snprintf(venues[venues_n], sizeof(venues[0]), "%s", s->dex);
+            venues_n++;
+        }
+    }
+
+    for (size_t k = 0; k < venues_n; k++) {
+        MK_APPEND("%s{\"name\":\"%s\",\"pools\":[",
+                  k ? "," : "", venues[k]);
+        int wrote = 0;
+        for (size_t i = 0; i < n; i++) {
+            const tb_arb_pool_t *p = tb_arb_pool(a, i);
+            const tb_arb_snap_t *s = tb_arb_last_snap(a, i);
+            if (!p || !s || strcmp(s->dex, venues[k]) != 0)
+                continue;
+            char pool_s[43], tok_s[43], buy_s[80];
+            tb_addr_to_hex(&p->pool, pool_s, sizeof(pool_s));
+            tb_addr_to_hex(&p->token, tok_s, sizeof(tok_s));
+            tb_u256_to_dec(&s->buy_out, buy_s, sizeof(buy_s));
+            uint32_t round_bp = 0;
+            if (!tb_arb_ratio_bp(&s->sell_back, &pv, &round_bp))
+                round_bp = 0;
+            MK_APPEND("%s{\"pool\":\"%s\",\"token\":\"%s\","
+                      "\"fee\":\"%u.%04u%%\",\"buy_out\":\"%s\","
+                      "\"round_bp\":%u,\"ts_ms\":%llu,\"fresh\":%s}",
+                      wrote++ ? "," : "", pool_s, tok_s,
+                      p->fee / 10000, p->fee % 10000, buy_s, round_bp,
+                      (unsigned long long)s->ts_ms,
+                      (now - s->ts_ms <= fmax) ? "true" : "false");
+        }
+        MK_APPEND("]}");
+    }
+
+    for (size_t i = 0; i < n
+         && pairs_n < TB_ARB_MAX_POOLS * TB_ARB_MAX_POOLS; i++) {
+        const tb_arb_snap_t *si = tb_arb_last_snap(a, i);
+        if (!si || !si->complete)
+            continue;
+        for (size_t j = 0; j < n; j++) {
+            if (i == j)
+                continue;
+            const tb_arb_snap_t *sj = tb_arb_last_snap(a, j);
+            if (!sj || !sj->complete || !tb_addr_eq(&si->token, &sj->token))
+                continue;
+            uint32_t r = 0;
+            if (!tb_arb_ratio_bp(&si->buy_out, &sj->buy_out, &r)
+                || r <= 10000)
+                continue;
+            struct pair_ent e = {
+                .bi = (uint32_t)i,
+                .si = (uint32_t)j,
+                .bp = r - 10000,
+                .prof = probe / 10000 * (uint64_t)(r - 10000),
+            };
+            size_t k = pairs_n++;
+            for (; k > 0 && pairs[k - 1].bp < e.bp; k--)
+                pairs[k] = pairs[k - 1];
+            pairs[k] = e;
+        }
+    }
+
+    MK_APPEND("],\"pairs\":[");
+    for (size_t k = 0; k < pairs_n; k++) {
+        const tb_arb_pool_t *bpl = tb_arb_pool(a, pairs[k].bi);
+        const tb_arb_pool_t *spl = tb_arb_pool(a, pairs[k].si);
+        const tb_arb_snap_t *bs = tb_arb_last_snap(a, pairs[k].bi);
+        const tb_arb_snap_t *ss = tb_arb_last_snap(a, pairs[k].si);
+        if (!bpl || !spl || !bs || !ss)
+            continue;
+        char tok_s[43], prof_s[80];
+        tb_addr_to_hex(&bpl->token, tok_s, sizeof(tok_s));
+        tb_u256_t pw = tb_u256_from_u64(pairs[k].prof);
+        tb_u256_to_dec(&pw, prof_s, sizeof(prof_s));
+        MK_APPEND("%s{\"token\":\"%s\",\"buy\":\"%s %u.%04u%%\","
+                  "\"sell\":\"%s %u.%04u%%\",\"spread_bp\":%u,"
+                  "\"profit_wei\":\"%s\"}",
+                  k ? "," : "", tok_s, bs->dex,
+                  bpl->fee / 10000, bpl->fee % 10000, ss->dex,
+                  spl->fee / 10000, spl->fee % 10000, pairs[k].bp, prof_s);
+    }
+    MK_APPEND("]}");
+    if (o < cap)
+        out[o] = '\0';
+}
 
 static void web_update_task(tb_loop_t *loop, tb_task_t *task, void *arg)
 {
@@ -312,7 +553,12 @@ static void web_update_task(tb_loop_t *loop, tb_task_t *task, void *arg)
              profit ? "" : " (−)",
              profit ? "" : "-", pnl_s,
              profit ? "good" : "bad");
-    tb_webui_set_json(d->web, json);
+    tb_webui_set_named(d->web, "status", json);
+
+    /* рынок для страницы «Биржи и цены» (тот же источник: tb_arb) */
+    char market[WEBUI_MARKET_JSON_MAX];
+    web_build_market(d, market, sizeof(market));
+    tb_webui_set_named(d->web, "market", market);
 }
 
 typedef struct resume_arg {
@@ -372,7 +618,7 @@ int main(int argc, char **argv)
     bool replay = false;
     bool live_exec = false;
     bool print_addr = false;
-    long web_port = 8080;
+    long web_port = 0; /* 0 = не задан (возьмём из конфига), -1 = --no-web */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
@@ -390,7 +636,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--web-port") == 0 && i + 1 < argc)
             web_port = strtol(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--no-web") == 0)
-            web_port = 0;
+            web_port = -1;
         else {
             fprintf(stderr,
                     "использование: %s [--config ФАЙЛ] [--ledger ФАЙЛ] "
@@ -413,6 +659,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "конфиг '%s': %s\n", cfg_path, err.message);
         return 1;
     }
+    tb_arb_defaults(&cfg); /* в т.ч. web-страницы/порт/период */
 
     /* ---- режим исполнения: конфиг network.live_exec или флаг ---- */
     if (cfg.dex.live)
@@ -584,12 +831,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* ---- веб-морда: дашборд + статус + журнал (127.0.0.1) ---- */
+    /* ---- веб-морда: страницы-микромодули (127.0.0.1) ---- */
     app.arb = arb;
     app.engine = engine;
     app.cfg = &cfg;
     app.start_weth = start;
     app.started_ms = tb_now_ms();
+    if (web_port == 0)
+        web_port = cfg.web.port; /* не задано флагом — берём из конфига */
     if (web_port > 0) {
         tb_error_t werr = TB_ERROR_INIT;
         if (tb_webui_start(&app.web, (uint16_t)web_port, ledger_path,
@@ -597,10 +846,26 @@ int main(int argc, char **argv)
             fprintf(stderr, "веб-морда: %s (продолжаем без неё)\n",
                     werr.message);
         } else {
+            /* какие страницы подняты — решает конфиг (web.pages) */
+            for (uint32_t k = 0; k < cfg.web.pages_n; k++) {
+                bool known = false;
+                for (size_t q = 0;
+                     q < sizeof(WEB_PAGES) / sizeof(WEB_PAGES[0]); q++)
+                    if (strcmp(WEB_PAGES[q].id, cfg.web.pages[k]) == 0) {
+                        tb_webui_page_add(app.web, &WEB_PAGES[q]);
+                        known = true;
+                        break;
+                    }
+                if (!known)
+                    fprintf(stderr, "веб-морда: неизвестная страница '%s'\n",
+                            cfg.web.pages[k]);
+            }
+            if (!cfg.web.refresh_ms)
+                cfg.web.refresh_ms = 2000;
             printf("веб-морда: http://127.0.0.1:%u\n",
                    (unsigned)tb_webui_port(app.web));
-            tb_loop_call_every(app.loop, 2000, TB_PRIO_LOW, "web.update",
-                               web_update_task, &app, NULL);
+            tb_loop_call_every(app.loop, cfg.web.refresh_ms, TB_PRIO_LOW,
+                               "web.update", web_update_task, &app, NULL);
             web_update_task(app.loop, NULL, &app);
         }
     }
