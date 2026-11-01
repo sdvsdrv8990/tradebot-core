@@ -36,9 +36,17 @@ SECP_SRC  := $(SECP_DIR)/src/secp256k1.c \
              $(SECP_DIR)/src/precomputed_ecmult_gen.c
 SECP_OBJ  := $(patsubst $(SECP_DIR)/src/%.c,$(BUILD)/secp256k1/%.o,$(SECP_SRC))
 SECP_CFLAGS := -std=c99 -O2 -g -I$(SECP_DIR)/include -I$(SECP_DIR)/src \
-               -I$(BUILD)/secp256k1/src
+               -I$(BUILD)/secp256k1/src -DENABLE_MODULE_RECOVERY=1
 MBEDTLS_OBJ := $(patsubst third_party/mbedtls/library/%.c,$(BUILD)/mbedtls/%.o,$(MBEDTLS_SRC))
 MBEDTLS_CFLAGS := -std=c99 -O2 -g -Ithird_party/mbedtls/include -Ithird_party/mbedtls/library
+
+$(BUILD)/libsecp256k1.a: $(SECP_OBJ)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
+$(BUILD)/secp256k1/%.o: $(SECP_DIR)/src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(SECP_CFLAGS) -c -o $@ $<
 
 $(BUILD)/libmbed_tls.a: $(MBEDTLS_OBJ)
 	@mkdir -p $(dir $@)
@@ -78,12 +86,24 @@ CORE_SRC := \
 
 RUNTIME_SRC := src/json/envelope.cpp src/json/config.cpp
 NET_SRC     := src/net/http.c
+SIGN_SRC   := src/sign/tx.c
 DEX_SRC     := src/exec/backend_dex.c
 USER_SRC    := src/user/filters.c src/user/decision.c src/user/arb.c
 
 CORE_OBJ   := $(addprefix $(BUILD)/,$(CORE_SRC:.c=.o))
 RUNTIME_OBJ:= $(addprefix $(BUILD)/,$(RUNTIME_SRC:.cpp=.o))
 NET_OBJ    := $(addprefix $(BUILD)/,$(NET_SRC:.c=.o))
+SIGN_OBJ   := $(addprefix $(BUILD)/,$(SIGN_SRC:.c=.o))
+
+$(BUILD)/libtb_sign.a: $(SIGN_OBJ)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
+$(BUILD)/src/sign/%.o: src/sign/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Ithird_party/secp256k1/include -c -o $@ $<
+
+
 DEX_OBJ    := $(addprefix $(BUILD)/,$(DEX_SRC:.c=.o))
 USER_OBJ   := $(addprefix $(BUILD)/,$(USER_SRC:.c=.o))
 DEMO_OBJ   := $(BUILD)/src/demo/bot_demo.o
@@ -95,7 +115,7 @@ TEST_C_BINS  := test_error test_registry test_arch test_pqueue test_timer \
         test_backoff test_runtime test_events test_ledger test_loop \
         test_u256 test_route test_wallet test_net test_backend_dex \
         test_filters test_decision test_config test_ids test_details \
-        test_ctx test_keccak
+        test_ctx test_keccak test_sign
 TEST_CXX_BINS:= test_envelope test_exec
 TEST_BINS    := $(TEST_C_BINS) $(TEST_CXX_BINS)
 
@@ -170,6 +190,10 @@ $(BUILD)/tests/test_exec: tests/test_exec.cpp $(BUILD)/libtb_core.a $(BUILD)/lib
 	$(CXX) $(CXXFLAGS) -o $@ $< $(BUILD)/libtb_runtime.a $(BUILD)/libtb_core.a $(LDFLAGS)
 
 # тесты, зависящие от tb_net/tb_dex (+mbedTLS)
+$(BUILD)/tests/test_sign: tests/test_sign.c $(BUILD)/libtb_core.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Ithird_party/secp256k1/include -o $@ $< $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libtb_core.a $(LDFLAGS)
+
 $(BUILD)/tests/test_net: tests/test_net.c $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libmbed_tls.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)

@@ -54,6 +54,7 @@ set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
 
 # secp256k1 (вендор) — подпись ECDSA для живых транзакций (v0.4)
+set(SECP256K1_ENABLE_MODULE_RECOVERY ON CACHE BOOL "" FORCE)
 set(SECP256K1_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
 set(SECP256K1_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SECP256K1_BUILD_EXHAUSTIVE_TESTS OFF CACHE BOOL "" FORCE)
@@ -94,6 +95,15 @@ add_library(tb_core STATIC
 )
 target_include_directories(tb_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(tb_core PUBLIC Threads::Threads m)
+
+# ---------------------------------------------------------------------------
+#  tb_sign — подпись EIP-1559 (secp256k1 + keccak), чистые функции
+# ---------------------------------------------------------------------------
+add_library(tb_sign STATIC
+  src/sign/tx.c
+)
+target_include_directories(tb_sign PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(tb_sign PUBLIC tb_core secp256k1)
 
 # ---------------------------------------------------------------------------
 #  tb_net — HTTP-транспорт (net + replay), TLS через вендоренный mbedTLS
@@ -190,6 +200,7 @@ set(TB_C_TESTS
   test_details
   test_ctx
   test_keccak
+  test_sign
 )
 foreach(name IN LISTS TB_C_TESTS)
   add_executable(${name} tests/${name}.c)
@@ -200,6 +211,7 @@ endforeach()
 target_link_libraries(test_net PRIVATE tb_net)
 target_link_libraries(test_backend_dex PRIVATE tb_dex)
 target_link_libraries(test_details PRIVATE tb_dex tb_user)
+target_link_libraries(test_sign PRIVATE tb_sign)
 target_link_libraries(test_filters PRIVATE tb_user)
 target_link_libraries(test_decision PRIVATE tb_user)
 target_link_libraries(test_config PRIVATE tb_runtime)
