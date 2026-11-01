@@ -60,6 +60,7 @@ add_library(tb_core STATIC
   src/core/error.c
   src/core/error_registry.c
   src/core/ids.c
+  src/core/detail.c
   src/core/log.c
   src/core/time.c
   src/core/alloc.c
@@ -176,6 +177,7 @@ set(TB_C_TESTS
   test_decision
   test_config
   test_ids
+  test_details
 )
 foreach(name IN LISTS TB_C_TESTS)
   add_executable(${name} tests/${name}.c)
@@ -185,6 +187,7 @@ foreach(name IN LISTS TB_C_TESTS)
 endforeach()
 target_link_libraries(test_net PRIVATE tb_net)
 target_link_libraries(test_backend_dex PRIVATE tb_dex)
+target_link_libraries(test_details PRIVATE tb_dex tb_user)
 target_link_libraries(test_filters PRIVATE tb_user)
 target_link_libraries(test_decision PRIVATE tb_user)
 target_link_libraries(test_config PRIVATE tb_runtime)

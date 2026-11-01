@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "tb/arch/arch.h"
+#include "tb/core/detail.h"
 #include "tb/core/time.h"
 
 /* ---- Состояние ---- */
@@ -239,6 +240,15 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
     if (getenv("TB_DEX_DEBUG"))
         fprintf(stderr, "[dex] REQ body: %s\n", body);
     tb_http_resp_t *resp = calloc(1, sizeof(*resp));
+#define DEX_ATTACH_HOP(res_str)                                                \
+    do {                                                                       \
+        uint8_t pack[TB_DETAIL_DATA_MAX];                                      \
+        size_t plen = tb_detail_pack_dex_hop(pack, sizeof(pack),               \
+                                             venue->quoter.b, data,             \
+                                             (res_str) ? (res_str) : "");      \
+        tb_error_detail(err, TB_G_DEX, TB_CMD_DEX_HOP, pack, plen);            \
+    } while (0)
+
     if (!resp)
         TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "dex: resp");
     int rc = -1;
@@ -261,6 +271,13 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
                      resp->retry_after_ms ? " (Retry-After)" : "");
         te->retryable = true;
         te->retry_after_ms = resp->retry_after_ms;
+        {
+            uint8_t pack2[TB_DETAIL_DATA_MAX];
+            size_t plen2 =
+                tb_detail_pack_net_raw(pack2, sizeof(pack2), resp->status,
+                                       resp->body, resp->body_len);
+            tb_error_detail(err, TB_G_NET, TB_CMD_NET_RAW, pack2, plen2);
+        }
         goto out;
     }
     if (resp->status != 200) {
@@ -268,6 +285,13 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
         TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                      "RPC %s: неожиданный HTTP %ld", venue->name,
                      (long)resp->status);
+        {
+            uint8_t pack2[TB_DETAIL_DATA_MAX];
+            size_t plen2 =
+                tb_detail_pack_net_raw(pack2, sizeof(pack2), resp->status,
+                                       resp->body, resp->body_len);
+            tb_error_detail(err, TB_G_NET, TB_CMD_NET_RAW, pack2, plen2);
+        }
         goto out;
     }
 
@@ -294,6 +318,7 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
                      reverted ? TB_EXEC_INSUFFICIENT_LIQUIDITY
                               : TB_EXEC_BACKEND,
                      "RPC %s: %s", venue->name, mbuf);
+        DEX_ATTACH_HOP(res);
         goto out;
     }
     /* ответ QuoterV2 — 4 слова; слово 0 (первые 32 байта) = amountOut */
@@ -301,13 +326,16 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
         fprintf(stderr, "[dex] result hex (rlen=%zu): %.134s\n", rlen, res);
     if (hex_to_u256(out, res, rlen > 66 ? 66 : rlen, err) != 0) {
         c->stats.rpc_errors++;
+        DEX_ATTACH_HOP(res);
         TB_ERROR_WRAP(err, "RPC %s", venue->name);
         goto out;
     }
     if (tb_u256_is_zero(out)) {
         c->stats.rpc_errors++;
         TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_INSUFFICIENT_LIQUIDITY,
-                     "RPC %s: нулевая котировка (пул пуст?)", venue->name);
+                     "RPC %s: нулевая котировка (rlen=%zu)", venue->name,
+                     rlen);
+        DEX_ATTACH_HOP(res); /* слепая зона "0x": сырой ответ в капсуле */
         goto out;
     }
     rc = 0;

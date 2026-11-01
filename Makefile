@@ -44,6 +44,7 @@ CORE_SRC := \
   src/core/error.c \
   src/core/error_registry.c \
   src/core/ids.c \
+  src/core/detail.c \
   src/core/log.c \
   src/core/time.c \
   src/core/alloc.c \
@@ -83,7 +84,7 @@ ARBDEMO_OBJ := $(BUILD)/src/demo/arb_demo.o
 TEST_C_BINS  := test_error test_registry test_arch test_pqueue test_timer \
         test_backoff test_runtime test_events test_ledger test_loop \
         test_u256 test_route test_wallet test_net test_backend_dex \
-        test_filters test_decision test_config test_ids
+        test_filters test_decision test_config test_ids test_details
 TEST_CXX_BINS:= test_envelope test_exec
 TEST_BINS    := $(TEST_C_BINS) $(TEST_CXX_BINS)
 
@@ -171,6 +172,10 @@ $(BUILD)/tests/test_filters: tests/test_filters.c $(BUILD)/libtb_user.a $(BUILD)
 	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
 
 $(BUILD)/tests/test_decision: tests/test_decision.c $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+
+$(BUILD)/tests/test_details: tests/test_details.c $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
 

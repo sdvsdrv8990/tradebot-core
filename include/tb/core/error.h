@@ -130,6 +130,8 @@ typedef enum {
  * ошибки», копирование — memcpy, владения кучей нет. Контекст накапливается
  * текстовым следом (tb_error_wrap / tb_error_promote), а не цепочкой
  * указателей — это делает значение безопасным к нулевой инициализации. */
+#include "tb/core/detail.h"
+
 typedef struct tb_error {
     uint8_t   domain;           /* tb_domain_t */
     uint16_t  group;            /* tb_group_id_t: кто сообщил (зона
@@ -141,7 +143,16 @@ typedef struct tb_error {
     uint32_t  retry_after_ms;   /* >0 — источник явно потребовал паузу (Retry-After) */
     char      message[TB_ERROR_MSG_MAX];  /* текст + след контекста */
     char      location[TB_ERROR_LOC_MAX]; /* цепочка file:line через " <- " */
+    /* Капсулы деталей («подробнее»): компактные сырые данные команды;
+     * конструкторы очищают, wrap сохраняет, promote наследует. */
+    tb_detail_t details[TB_ERROR_DETAILS_MAX];
+    uint8_t     details_n;
 } tb_error_t;
+
+/* Добавить капсулу деталей к ошибке (нет свободных слотов — старейшая
+ * замещается). Данные усекаются до TB_DETAIL_DATA_MAX. */
+void tb_error_detail(struct tb_error *err, uint16_t group, uint16_t cmd,
+                     const void *data, size_t len);
 
 #define TB_ERROR_INIT { 0 }
 

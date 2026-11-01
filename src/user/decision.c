@@ -12,6 +12,7 @@
  *  контракта прибыли нет — сделка не предлагается.
  * ========================================================================== */
 #include "tb/user/arb.h"
+#include "tb/core/detail.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -62,11 +63,31 @@ int tb_arb_eval_pair(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
     }
 
     tb_u256_t b1, s1;
+    /* траектория поиска (для капсулы деталей на ошибке котировщика) */
+    uint64_t t_size[3] = {0}, t_out[3] = {0};
+    int t_n = 0;
+#define TRACK(sz, so)                                                          \
+    do {                                                                       \
+        if (t_n < 3) {                                                         \
+            t_size[t_n] = (sz).w[0];                                           \
+            t_out[t_n] = (so).w[0];                                            \
+            t_n++;                                                             \
+        }                                                                      \
+    } while (0)
+#define ATTACH_CURVE()                                                         \
+    do {                                                                       \
+        uint8_t pack[TB_DETAIL_DATA_MAX];                                      \
+        size_t plen = tb_detail_pack_curve(pack, sizeof(pack), t_size, t_out); \
+        tb_error_detail(err, TB_G_DECISION, TB_CMD_DECIDE_CURVE, pack, plen);  \
+    } while (0)
 
     /* 1) на верхе контракта прибыли нет — не тратим RPC дальше */
     int rc = eval_size(cfg, p, quote, qctx, &hi, &b1, &s1, err);
-    if (rc < 0)
+    if (rc < 0) {
+        ATTACH_CURVE();
         return -1;
+    }
+    TRACK(hi, s1);
     res->probes++;
     if (rc == 0) {
         snprintf(res->reason, sizeof(res->reason),
@@ -77,8 +98,11 @@ int tb_arb_eval_pair(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
     /* 2) на минималке прибыль есть — минималка и есть ставка */
     tb_u256_t size = lo;
     rc = eval_size(cfg, p, quote, qctx, &size, &b1, &s1, err);
-    if (rc < 0)
+    if (rc < 0) {
+        ATTACH_CURVE();
         return -1;
+    }
+    TRACK(size, s1);
     res->probes++;
     if (rc == 1) {
         res->ok = true;
@@ -96,8 +120,11 @@ int tb_arb_eval_pair(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
         if (!tb_u256_mul_u64(&cur, &cur, 2) || tb_u256_cmp(&cur, &hi) > 0)
             cur = hi;
         rc = eval_size(cfg, p, quote, qctx, &cur, &b1, &s1, err);
-        if (rc < 0)
+        if (rc < 0) {
+            ATTACH_CURVE();
             return -1;
+        }
+        TRACK(cur, s1);
         res->probes++;
         if (rc == 1) {
             found = true;

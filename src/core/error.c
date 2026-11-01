@@ -16,6 +16,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+void tb_error_detail(struct tb_error *err, uint16_t group, uint16_t cmd,
+                     const void *data, size_t len)
+{
+    if (!err || !data)
+        return;
+    if (len > TB_DETAIL_DATA_MAX)
+        len = TB_DETAIL_DATA_MAX;
+
+    /* details_n — счётчик добавлений: слот = n % MAX, кольцо;
+     * заполненные капсулы замещаются по кругу (старейшая первой). */
+    uint8_t slot = err->details_n % TB_ERROR_DETAILS_MAX;
+    if (err->details_n < 0xff)
+        err->details_n++;
+
+    tb_detail_t *d = &err->details[slot];
+    d->group = group;
+    d->cmd = cmd;
+    memset(d->data, 0, sizeof(d->data));
+    memcpy(d->data, data, len);
+    d->data_len = (uint8_t)len;
+}
+
 /* ---- Глобальный обработчик ---- */
 static tb_error_handler_fn g_handler;
 static void               *g_handler_user;
@@ -154,10 +176,16 @@ static void error_promotev(tb_error_t *err, uint16_t group, uint8_t domain,
 
     char orig[TB_ERROR_MSG_MAX];
     char origloc[TB_ERROR_LOC_MAX];
+    tb_detail_t orig_details[TB_ERROR_DETAILS_MAX];
+    uint8_t orig_details_n = err->details_n;
     memcpy(orig, err->message, sizeof(orig));
     memcpy(origloc, err->location, sizeof(origloc));
+    memcpy(orig_details, err->details, sizeof(orig_details));
 
     error_setv(err, group, domain, code, location, fmt, ap);
+    /* происхождение не теряется: капсулы наследуются */
+    memcpy(err->details, orig_details, sizeof(orig_details));
+    err->details_n = orig_details_n;
 
     /* Прежнее сообщение сохраняется следом. */
     if (orig[0] != '\0') {
