@@ -27,6 +27,7 @@ typedef struct tb_evmod {
     char            name[TB_EVMOD_NAME_MAX];
     tb_ev_handler_t handler;
     void           *user;
+    uint32_t        needs;    /* TB_CTX_*: контекст, нужный шагу */
     bool            enabled;
     /* статистика шага */
     uint64_t        seen;     /* событий дошло до шага */
@@ -285,6 +286,24 @@ int tb_evreg_add(tb_evreg_t *r, const char *name, tb_ev_handler_t fn,
     return mod_insert_at(r, r->nmods, name, fn, user, err);
 }
 
+int tb_evreg_add_needs(tb_evreg_t *r, const char *name, tb_ev_handler_t fn,
+                       void *user, uint32_t needs, tb_error_t *err)
+{
+    int at = tb_evreg_add(r, name, fn, user, err);
+    if (at < 0)
+        return at;
+    r->mods[r->nmods - 1].needs = needs;
+    return at;
+}
+
+uint32_t tb_evreg_step_needs(const tb_evreg_t *r, const char *name)
+{
+    if (!r || !name)
+        return 0;
+    int i = tb_evreg_mod_index((tb_evreg_t *)r, name);
+    return i >= 0 ? r->mods[i].needs : 0;
+}
+
 int tb_evreg_add_before(tb_evreg_t *r, const char *anchor, const char *name,
                         tb_ev_handler_t fn, void *user, tb_error_t *err)
 {
@@ -450,6 +469,18 @@ static int evreg_walk(tb_evreg_t *r, tb_event_t *ev, size_t start, tb_error_t *e
         ev->steps++;
         m->seen++;
         uint32_t version = r->chain_version;
+
+        /* Контракт контекста: шагу не донесены нужные ключи — отказ
+         * с точным именованием (кто и чего ждёт). */
+        if (m->needs && tb_event_ctx_missing(ev, m->needs)) {
+            TB_ERROR_SET(&ev->err, TB_DOMAIN_EVENTS, TB_EV_CONTRACT,
+                         "шагу '%s' не донесён контекст %08x (есть %08x)",
+                         modname, (unsigned)tb_event_ctx_missing(ev, m->needs),
+                         (unsigned)ev->ctx_has);
+            m->failed++;
+            set_state(r, ev, TB_EV_FAILED);
+            goto out;
+        }
 
         tb_ev_action_t act = m->handler(r, ev, m->user);
 

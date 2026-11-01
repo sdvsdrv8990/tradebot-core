@@ -105,11 +105,24 @@ typedef tb_ev_action_t (*tb_ev_handler_t)(tb_evreg_t *r, tb_event_t *ev,
 #define TB_EV_FLAG_USER_MASK 0xF0u  /* пользовательские биты (шаги домена) */
 #define TB_EV_F_RESTART      0x01u  /* внутренний флаг: продолжить с начала */
 
+    /* ---- Ключи контекста события (needs-маски шагов) ----
+     * Битовые ключи «что уже донесено до события». Шаг может объявить
+     * требования (tb_evreg_add_needs): прогон шага без нужных ключей —
+     * контрактное нарушение с именем шага и недостающими ключами
+     * («кто не донёс» перестаёт быть вопросом расследования).
+     * Значения заморожены; владельцы доменов добавляют свои в конец. */
+#define TB_CTX_EXEC_ORDER  (1u << 0) /* exec: контекст ордера готов */
+#define TB_CTX_EXEC_ROUTE  (1u << 1) /* exec: маршрут проверен */
+#define TB_CTX_EXEC_TX     (1u << 2) /* exec: сессия бэкенда открыта */
+#define TB_CTX_MKT_SNAP    (1u << 3) /* user: снапшот котировок полный */
+#define TB_CTX_MKT_HIST    (1u << 4) /* user: история мидов приложена */
+
 struct tb_event {
     uint64_t   id;            /* монотонный, в пределах реестра не переиспользуется */
     uint16_t   kind;          /* тип события в терминах владельца */
     uint8_t    state;         /* tb_ev_state_t */
     uint8_t    flags;         /* младшие 4 бита — реестр, TB_EV_FLAG_USER_MASK — шаги */
+    uint32_t   ctx_has;       /* TB_CTX_*: контекст, донесённый шагами */
     int32_t    origin;        /* слот модуля-создателя; -1 — создан извне цепочки */
     uint64_t   tag;           /* произвольное значение владельца/шагов (POD, без владения) */
     uint64_t   created_ms;
@@ -121,6 +134,20 @@ struct tb_event {
     tb_error_t err;           /* контекст ошибки: POD, хранится по значению */
     char       trace[TB_EV_TRACE_MAX];        /* текстовый след шагов */
 };
+
+/* Продюсер контекста: объявить ключи события (дизъюнкция). */
+static inline void tb_event_ctx_give(tb_event_t *ev, uint32_t keys)
+{
+    if (ev)
+        ev->ctx_has |= keys;
+}
+
+/* Чего не хватает событию под требования needs (0 — всё есть). */
+static inline uint32_t tb_event_ctx_missing(const tb_event_t *ev,
+                                            uint32_t needs)
+{
+    return needs & ~(ev ? ev->ctx_has : 0);
+}
 
 /* ---- Статистика реестра ---- */
 typedef struct tb_evreg_stats {
@@ -162,6 +189,15 @@ int  tb_evreg_add(tb_evreg_t *r, const char *name, tb_ev_handler_t fn,
  * середину конвейера без переписывания остальных шагов. */
 int  tb_evreg_add_before(tb_evreg_t *r, const char *anchor, const char *name,
                          tb_ev_handler_t fn, void *user, tb_error_t *err);
+
+/* Шаг с требованиями к контексту события: если у события нет нужных
+ * TB_CTX_*-ключей, шаг не вызывается — событие FAILed с кодом
+ * TB_EV_CONTRACT (имя шага и недостающие ключи в сообщении). */
+int  tb_evreg_add_needs(tb_evreg_t *r, const char *name, tb_ev_handler_t fn,
+                        void *user, uint32_t needs, tb_error_t *err);
+
+/* Требования шага по имени (0 — шаг без требований/не найден). */
+uint32_t tb_evreg_step_needs(const tb_evreg_t *r, const char *name);
 
 /* Выгрузить шаг. События, заблокированные этим шагом, при продолжении
  * прогоняются с начала цепочки (см. контракты выше). */

@@ -178,6 +178,7 @@ set(TB_C_TESTS
   test_config
   test_ids
   test_details
+  test_ctx
 )
 foreach(name IN LISTS TB_C_TESTS)
   add_executable(${name} tests/${name}.c)

@@ -93,6 +93,9 @@ typedef struct tb_arb_snap {
     tb_u256_t buy_out;    /* TOKEN за probe_wei (WETH -> TOKEN) */
     tb_u256_t big_out;    /* TOKEN за probe_wei * mult (ликвидность) */
     tb_u256_t sell_back;  /* WETH за buy_out (TOKEN -> WETH) */
+    bool      complete;   /* все три котировки донесены (контракт
+                           * контекста: неполный отсекается фильтрами
+                           * с явной причиной, а не «арифметикой») */
 } tb_arb_snap_t;
 
 typedef struct tb_arb_hist {

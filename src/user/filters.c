@@ -104,6 +104,15 @@ int tb_arb_filter_eval(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *s,
     memset(v, 0, sizeof(*v));
     v->pass = true;
 
+    /* 0. Контракт контекста: снапшот должен быть полным — иначе любое
+     * число ниже могло быть «не донесено», а не «плохим». */
+    if (!s->complete) {
+        v->pass = false;
+        snprintf(v->reject, sizeof(v->reject),
+                 "контекст: снапшот неполный (котировки не донесены)");
+        return 0;
+    }
+
     /* 1. Актуальность */
     v->age_ms = now_ms > s->ts_ms ? now_ms - s->ts_ms : 0;
     uint64_t fmax = cfg->freshness_max_ms;

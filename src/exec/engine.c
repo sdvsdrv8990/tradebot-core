@@ -337,6 +337,9 @@ static tb_ev_action_t step_preflight(tb_evreg_t *r, tb_event_t *ev, void *user)
                   "проверки пройдены",
                   (unsigned long long)c->order_no, in_hex, out_hex, hops,
                   (unsigned long long)(o->deadline_ms - now));
+    /* Контекст донесён: ордер и маршрут валидны — шаги ниже могут
+     * объявлять эти ключи в требованиях (tb_evreg_add_needs). */
+    tb_event_ctx_give(ev, TB_CTX_EXEC_ORDER | TB_CTX_EXEC_ROUTE);
     return TB_EV_ACT_CHAIN;
 }
 
@@ -782,11 +785,12 @@ tb_exec_engine_t *tb_exec_create(const tb_exec_cfg_t *cfg, tb_error_t *err)
     e->br_mod.br = &e->breaker;
 
     /* Цепочка исполнения (порядок = порядок регистрации). */
-    struct { const char *name; tb_ev_handler_t fn; void *user; } steps[] = {
+    struct { const char *name; tb_ev_handler_t fn; void *user;
+             uint32_t needs; } steps[] = {
         { "preflight", step_preflight, e },
         { "ratelimit", tb_evmod_ratelimit_fn, &e->rl_mod },
         { "breaker",   tb_evmod_breaker_fn,   &e->br_mod },
-        { "quote",     step_quote,     e },
+        { "quote",     step_quote,     e, TB_CTX_EXEC_ORDER | TB_CTX_EXEC_ROUTE },
         { "balance",   step_balance,   e },
         { "approve",   step_approve,   e },
         { "execute",   step_execute,   e },
@@ -794,8 +798,12 @@ tb_exec_engine_t *tb_exec_create(const tb_exec_cfg_t *cfg, tb_error_t *err)
         { "commit",    step_commit,    e },
     };
     for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
-        if (tb_evreg_add(e->reg, steps[i].name, steps[i].fn, steps[i].user,
-                         err) < 0) {
+        int rc = steps[i].needs
+                     ? tb_evreg_add_needs(e->reg, steps[i].name, steps[i].fn,
+                                          steps[i].user, steps[i].needs, err)
+                     : tb_evreg_add(e->reg, steps[i].name, steps[i].fn,
+                                    steps[i].user, err);
+        if (rc < 0) {
             tb_exec_destroy(e);
             return NULL;
         }

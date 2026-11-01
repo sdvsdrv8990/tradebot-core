@@ -25,6 +25,7 @@ static tb_arb_snap_t mk_snap(uint64_t buy_out, uint64_t big_out,
     s.sell_back = u64(buy_out);
     snprintf(s.dex, sizeof(s.dex), "%s", dex);
     s.ts_ms = 1000000 - age_ms; /* now = 1000000 в тестах */
+    s.complete = true;
     return s;
 }
 
@@ -147,6 +148,19 @@ int main(void)
             tb_arb_hist_push(&ring, &flat);
         tb_arb_hist_push(&ring, &bump);
         CHECK(ring.n == TB_ARB_HISTORY_LEN);
+    }
+
+    /* ---- 0. Контракт контекста: неполный снапшот отсекается явно ---- */
+    {
+        tb_arb_cfg_t c = mk_cfg();
+        tb_arb_hist_t h = {0};
+        tb_arb_verdict_t v;
+        tb_arb_snap_t broken = mk_snap(1000, 9900, "dex-ok", 0);
+        broken.complete = false; /* котировки не донесены */
+        CHECK(tb_arb_filter_eval(&c, &broken, &h, 1000000, &v) == 0);
+        CHECK(!v.pass);
+        CHECK(strstr(v.reject, "неполный") != NULL);
+        CHECK(!v.freshness_ok && !v.liquidity_ok); /* проверки не шли */
     }
 
     printf("OK test_filters\n");

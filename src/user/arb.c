@@ -121,8 +121,9 @@ static void pool_work(void *arg)
     if (arb_quote_dir(a, &p->pool, p->fee, &a->cfg.weth, &p->token, &big,
                       &s->big_out, &err) != 0)
         return;
-    (void)arb_quote_dir(a, &p->pool, p->fee, &p->token, &a->cfg.weth,
-                        &s->buy_out, &s->sell_back, &err);
+    if (arb_quote_dir(a, &p->pool, p->fee, &p->token, &a->cfg.weth,
+                      &s->buy_out, &s->sell_back, &err) == 0)
+        s->complete = true; /* всё донесено: фильтрам можно верить */
 }
 
 static void pool_done(tb_loop_t *loop, void *arg)

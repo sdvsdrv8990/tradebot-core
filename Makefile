@@ -84,7 +84,8 @@ ARBDEMO_OBJ := $(BUILD)/src/demo/arb_demo.o
 TEST_C_BINS  := test_error test_registry test_arch test_pqueue test_timer \
         test_backoff test_runtime test_events test_ledger test_loop \
         test_u256 test_route test_wallet test_net test_backend_dex \
-        test_filters test_decision test_config test_ids test_details
+        test_filters test_decision test_config test_ids test_details \
+        test_ctx
 TEST_CXX_BINS:= test_envelope test_exec
 TEST_BINS    := $(TEST_C_BINS) $(TEST_CXX_BINS)
 
