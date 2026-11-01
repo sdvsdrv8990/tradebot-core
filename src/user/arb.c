@@ -176,6 +176,19 @@ static void decide_work(void *arg)
     tb_arb_t *a = d->a;
     uint64_t now = tb_now_ms();
 
+    if (getenv("TB_ARB_DEBUG"))
+        for (size_t i = 0; i < d->batch->n; i++) {
+            char b1[80], b2[80], b3[80];
+            tb_u256_to_dec(&d->batch->snaps[i].buy_out, b1, sizeof(b1));
+            tb_u256_to_dec(&d->batch->snaps[i].big_out, b2, sizeof(b2));
+            tb_u256_to_dec(&d->batch->snaps[i].sell_back, b3, sizeof(b3));
+            fprintf(stderr,
+                    "[arb] snap %zu: buy=%s (%08llx %08llx) big=%s back=%s\n",
+                    i, b1,
+                    (unsigned long long)d->batch->snaps[i].buy_out.w[1],
+                    (unsigned long long)d->batch->snaps[i].buy_out.w[0],
+                    b2, b3);
+        }
     for (size_t i = 0; i < d->batch->n; i++) {
         tb_arb_filter_eval(&a->cfg, &d->batch->snaps[i],
                            &a->hist[d->batch->snaps[i].pool_idx], now,
@@ -348,6 +361,7 @@ void batch_maybe_decide(tb_arb_t *a, arb_batch_t *b)
 {
     if (b->remaining > 0)
         return;
+    a->stats.quotes += b->n;
 
     decide_job_t *d = calloc(1, sizeof(*d));
     if (!d) {

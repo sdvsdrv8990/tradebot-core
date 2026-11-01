@@ -18,8 +18,33 @@
 
 #include <string.h>
 
+/* Деление a/b в б.п.: (a*10000)/b, пока b не влезает в u64 — сдвигаем
+ * оба вправо на 64 бита (точность целых б.п. достаточна). */
+static bool ratio_bp(const tb_u256_t *a, const tb_u256_t *b, uint32_t *out_bp)
+{
+    tb_u256_t num = *a, den = *b;
+    if (tb_u256_is_zero(&den))
+        return false;
+    while (den.w[1] || den.w[2] || den.w[3]) {
+        /* shr 64 */
+        num.w[0] = num.w[1]; num.w[1] = num.w[2]; num.w[2] = num.w[3];
+        num.w[3] = 0;
+        den.w[0] = den.w[1]; den.w[1] = den.w[2]; den.w[2] = den.w[3];
+        den.w[3] = 0;
+        if (tb_u256_is_zero(&den))
+            return false;
+    }
+    if (!tb_u256_mul_u64(&num, &num, 10000))
+        return false;
+    (void)tb_u256_div_u64(&num, &num, den.w[0]); /* остаток — усечение вниз */
+    if (num.w[1] || num.w[2] || num.w[3] || num.w[0] > 0xffffffffull)
+        return false; /* за пределами разумного bp — данные безумны */
+    *out_bp = (uint32_t)num.w[0];
+    return true;
+}
+
 /* Ставка на probe: buy_out; на probe*mult: big_out/mult.
- * impact_bp = (buy_out*mult − big_out)*10000 / (buy_out*mult). */
+ * impact_bp = (buy_out*mult − big_out) / (buy_out*mult) в б.п. */
 static bool snap_impact_bp(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *s,
                            uint32_t *out_bp)
 {
@@ -35,13 +60,7 @@ static bool snap_impact_bp(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *s,
     }
     if (!tb_u256_sub(&diff, &small_scaled, &s->big_out))
         return false;
-    if (!tb_u256_mul_u64(&diff, &diff, 10000))
-        return false;
-    (void)tb_u256_div_u64(&diff, &diff, 10000); /* остаток — усечение вниз */
-    if (diff.w[2] || diff.w[3])
-        return false; /* не влезает в bp-масштаб — данные безумны */
-    *out_bp = (uint32_t)diff.w[0];
-    return true;
+    return ratio_bp(&diff, &small_scaled, out_bp);
 }
 
 static bool hist_vol_bp(const tb_arb_hist_t *h, uint32_t *out_bp)
@@ -74,14 +93,7 @@ static bool hist_vol_bp(const tb_arb_hist_t *h, uint32_t *out_bp)
             max_dev = dev;
     }
 
-    tb_u256_t bp = max_dev;
-    if (!tb_u256_mul_u64(&bp, &bp, 10000))
-        return false;
-    (void)tb_u256_div_u64(&bp, &bp, mean.w[0] ? mean.w[0] : 1);
-    if (bp.w[2] || bp.w[3])
-        return false;
-    *out_bp = (uint32_t)bp.w[0];
-    return true;
+    return ratio_bp(&max_dev, &mean, out_bp);
 }
 
 int tb_arb_filter_eval(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *s,

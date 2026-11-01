@@ -145,6 +145,12 @@ add_executable(exec_demo src/demo/exec_demo.c)
 target_link_libraries(exec_demo PRIVATE tb_core)
 
 # ---------------------------------------------------------------------------
+#  Демо: арбитражный конвейер (живые котировки + shadow-исполнение)
+# ---------------------------------------------------------------------------
+add_executable(arb_demo src/demo/arb_demo.c)
+target_link_libraries(arb_demo PRIVATE tb_user tb_runtime tb_dex tb_net tb_core)
+
+# ---------------------------------------------------------------------------
 #  Тесты (CTest)
 # ---------------------------------------------------------------------------
 enable_testing()

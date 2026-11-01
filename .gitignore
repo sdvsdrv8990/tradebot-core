@@ -9,3 +9,4 @@ build/
 /tradebot_events.jsonl
 /events_demo.jsonl
 /exec_demo.jsonl
+/arb_demo.jsonl

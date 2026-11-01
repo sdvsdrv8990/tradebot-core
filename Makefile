@@ -77,6 +77,7 @@ USER_OBJ   := $(addprefix $(BUILD)/,$(USER_SRC:.c=.o))
 DEMO_OBJ   := $(BUILD)/src/demo/bot_demo.o
 EVTDEMO_OBJ:= $(BUILD)/src/demo/events_demo.o
 EXECDEMO_OBJ:= $(BUILD)/src/demo/exec_demo.o
+ARBDEMO_OBJ := $(BUILD)/src/demo/arb_demo.o
 
 TEST_C_BINS  := test_error test_registry test_arch test_pqueue test_timer \
         test_backoff test_runtime test_events test_ledger test_loop \
@@ -88,7 +89,7 @@ TEST_BINS    := $(TEST_C_BINS) $(TEST_CXX_BINS)
 .PHONY: all debug markers test run run-events run-exec clean
 
 all: $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a $(BUILD)/bot_demo \
-     $(BUILD)/events_demo $(BUILD)/exec_demo
+     $(BUILD)/events_demo $(BUILD)/exec_demo $(BUILD)/arb_demo
 
 debug:
 	$(MAKE) OPT="-O0 -g -DTB_DEBUG" all
