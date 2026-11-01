@@ -1,28 +1,18 @@
 #!/usr/bin/env bash
-# Развертывание одной командой: проверяет сборку (при необходимости —
-# ./setup.sh all) и поднимает бота вместе с веб-мордой. Без привязки
-# ко времени — работает до остановки.
+# Развёртывание одной командой: проверяет сборку (при необходимости —
+# ./setup.sh all) и поднимает бота вместе с веб-мордой. Привязки ко
+# времени нет — работает до остановки.
 #
-# Использование:
-#   ./run.sh            # запуск бота + веб-морды (работает до остановки)
-#   ./run.sh stop       # корректная остановка бота (SIGINT, затем SIGTERM)
-#   ./run.sh status     # показать запущен ли бот и порт морды
+# Команды:
+#   ./run.sh            # бот + веб-морда; режим — из конфига
+#                          (arb_config.json рядом, иначе docs/пример;
+#                           network.live_exec: true = боевое исполнение)
+#   ./run.sh stop       # корректная остановка (то же: Ctrl+C, kill <pid>)
+#   ./run.sh status     # запущен ли бот и порт морды
+#   ./run.sh addr       # адрес ключа бота — добавить владельцем в Safe
 #
-# Остановка (все способы эквивалентны, бот завершается корректно —
-# печатает итоги и гасит веб-морду):
-#   ./run.sh stop       # команда остановки
-#   Ctrl+C              # если запущено из терминала
-#   kill <pid>          # стандартная для Linux (SIGTERM)
-#
-# Переменные окружения (все опциональны):
-#   TB_MODE     = replay (по умолчанию) | live | live-exec
-#                   replay    — офлайн-демо на локальном mock-RPC;
-#                   live      — живые котировки mainnet без отправки сделок;
-#                   live-exec — живое исполнение из Safe (нужны config/key!)
-#   TB_WEB_PORT = порт веб-морды (8080; если занят — бот возьмёт ближайший)
-#   TB_CONFIG   = путь к конфигу (docs/arb_config.example.json)
-#   TB_LEDGER   = файл журнала событий (./arb_demo.jsonl)
-#   TB_DURATION = ограничение работы в МС (по умолчанию — нет, до остановки)
+# Переменные (опционально): TB_WEB_PORT, TB_CONFIG, TB_LEDGER, TB_MODE
+# (replay — офлайн-демо на mock-RPC), TB_DURATION (МС).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +21,10 @@ cd "$ROOT"
 BIN="$ROOT/.build/arb_demo"
 PIDFILE="$ROOT/.build/bot.pid"
 WEB_DEFAULT_PORT=8080
+
+# Личный конфиг имеет приоритет; example — для первого запуска (replay/live-котировки).
+CFG_DEFAULT="$ROOT/arb_config.json"
+[ -f "$CFG_DEFAULT" ] || CFG_DEFAULT="$ROOT/docs/arb_config.example.json"
 
 bot_pid() { [ -f "$PIDFILE" ] && cat "$PIDFILE" 2>/dev/null || true; }
 bot_alive() {
@@ -71,38 +65,45 @@ cmd_stop() {
     rm -f "$PIDFILE"
 }
 
+ensure_built() {
+    # Полный ./setup.sh all (зависимости+сборка+тесты), если бинарника нет
+    # или исходники новее. Идемпотентно, кэш не тянет.
+    if [ ! -x "$BIN" ] || [ -n "$(find src include CMakeLists.txt -newer "$BIN" -print -quit 2>/dev/null)" ]; then
+        echo "run.sh: нужна (пере)сборка — запускаю ./setup.sh all"
+        ./setup.sh all
+    fi
+}
+
+cmd_addr() {
+    ensure_built
+    exec "$BIN" --config "${TB_CONFIG:-$CFG_DEFAULT}" --print-addr
+}
+
 cmd_start() {
     if bot_alive; then
         echo "run.sh: уже запущен (pid $(bot_pid)) — сначала ./run.sh stop" >&2
         exit 1
     fi
     rm -f "$PIDFILE"
+    ensure_built
 
-    # Сборка: полный ./setup.sh all (зависимости+сборка+тесты), если
-    # бинарника нет или исходники новее него. Идемпотентно, кэш не тянет.
-    if [ ! -x "$BIN" ] || [ -n "$(find src include CMakeLists.txt -newer "$BIN" -print -quit 2>/dev/null)" ]; then
-        echo "run.sh: нужна (пере)сборка — запускаю ./setup.sh all"
-        ./setup.sh all
-    fi
-
-    local mode="${TB_MODE:-replay}"
-    local cfg="${TB_CONFIG:-docs/arb_config.example.json}"
+    local cfg="${TB_CONFIG:-$CFG_DEFAULT}"
     local led="${TB_LEDGER:-./arb_demo.jsonl}"
     local port="${TB_WEB_PORT:-$WEB_DEFAULT_PORT}"
 
     local args=(--config "$cfg" --ledger "$led" --web-port "$port")
-    case "$mode" in
+    case "${TB_MODE:-}" in
+        "")         : ;; # режим из конфига (live_exec: true = бой)
         replay)    args+=(--replay) ;;
-        live)      : ;;
         live-exec) args+=(--live-exec) ;;
-        *) echo "run.sh: неизвестный TB_MODE='$mode' (replay | live | live-exec)" >&2; exit 1 ;;
+        *) echo "run.sh: неизвестный TB_MODE='$TB_MODE' (replay | live-exec)" >&2; exit 1 ;;
     esac
     # Привязки ко времени нет; TB_DURATION — единственный способ ограничить.
     [ -n "${TB_DURATION:-}" ] && [ "$TB_DURATION" -gt 0 ] 2>/dev/null \
         && args+=(--duration "$TB_DURATION")
 
     mkdir -p "$ROOT/.build"
-    echo "─── run.sh: режим=$mode │ веб-морда: http://127.0.0.1:$port │ журнал: $led"
+    echo "─── run.sh: конфиг $cfg │ веб-морда: http://127.0.0.1:$port │ журнал: $led"
 
     "$BIN" "${args[@]}" &
     local bot=$!
@@ -126,5 +127,6 @@ case "${1:-start}" in
     start)  cmd_start ;;
     stop)   cmd_stop ;;
     status) cmd_status ;;
-    *) echo "использование: ./run.sh [start | stop | status]" >&2; exit 2 ;;
+    addr)   cmd_addr ;;
+    *) echo "использование: ./run.sh [start | stop | status | addr]" >&2; exit 2 ;;
 esac

@@ -12,3 +12,4 @@ build/
 /exec_demo.jsonl
 /arb_demo.jsonl
 bot_key.hex
+/arb_config.json

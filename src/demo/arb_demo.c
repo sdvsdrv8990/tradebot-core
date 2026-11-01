@@ -371,6 +371,7 @@ int main(int argc, char **argv)
     uint64_t duration_ms = 0; /* 0 = без ограничения по времени */
     bool replay = false;
     bool live_exec = false;
+    bool print_addr = false;
     long web_port = 8080;
 
     for (int i = 1; i < argc; i++) {
@@ -384,6 +385,8 @@ int main(int argc, char **argv)
             replay = true;
         else if (strcmp(argv[i], "--live-exec") == 0)
             live_exec = true;
+        else if (strcmp(argv[i], "--print-addr") == 0)
+            print_addr = true;
         else if (strcmp(argv[i], "--web-port") == 0 && i + 1 < argc)
             web_port = strtol(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--no-web") == 0)
@@ -392,7 +395,7 @@ int main(int argc, char **argv)
             fprintf(stderr,
                     "использование: %s [--config ФАЙЛ] [--ledger ФАЙЛ] "
                     "[--duration МС (0=бессрочно)] [--replay] [--live-exec] "
-                    "[--web-port N] [--no-web]\n",
+                    "[--print-addr] [--web-port N] [--no-web]\n",
                     argv[0]);
             return 2;
         }
@@ -409,6 +412,57 @@ int main(int argc, char **argv)
     if (tb_arb_cfg_load(&cfg, cfg_path, &err) != 0) {
         fprintf(stderr, "конфиг '%s': %s\n", cfg_path, err.message);
         return 1;
+    }
+
+    /* ---- режим исполнения: конфиг network.live_exec или флаг ---- */
+    if (cfg.dex.live)
+        live_exec = true;
+    if (replay)
+        live_exec = false; /* replay — офлайн-демо, исполнения не бывает */
+
+    /* Safe-вызовы ходят в RPC первого venue, если не задан отдельный */
+    if (!cfg.dex.safe.rpc_url[0] && cfg.dex.venues_n > 0) {
+        snprintf(cfg.dex.safe.rpc_url, sizeof(cfg.dex.safe.rpc_url), "%s",
+                 cfg.dex.venues[0].rpc_url);
+        snprintf(cfg.dex.safe.rpc_host_pinned,
+                 sizeof(cfg.dex.safe.rpc_host_pinned), "%s",
+                 cfg.dex.venues[0].rpc_host_pinned);
+    }
+
+    /* ---- ключ бота: env TB_BOT_KEY или network.key_file ---- */
+    if (live_exec || print_addr) {
+        tb_key_t key;
+        if (tb_key_from_env(&key, "TB_BOT_KEY", NULL) != 0) {
+            /* файл: одна строка hex (перевод строки обрезаем) */
+            char hex[128] = {0};
+            FILE *kf = fopen(cfg.key_file[0] ? cfg.key_file : "bot_key.hex",
+                             "r");
+            if (!kf) {
+                fprintf(stderr,
+                        "ключ: задайте TB_BOT_KEY или создайте файл:\n"
+                        "  openssl rand -hex 32 > %s\n",
+                        cfg.key_file[0] ? cfg.key_file : "bot_key.hex");
+                return 1;
+            }
+            if (!fgets(hex, sizeof(hex), kf)) {
+                fprintf(stderr, "ключ: пустой файл\n");
+                fclose(kf);
+                return 1;
+            }
+            fclose(kf);
+            hex[strcspn(hex, " \t\r\n")] = '\0';
+            if (tb_key_from_hex(&key, hex, &err) != 0) {
+                fprintf(stderr, "ключ: %s\n", err.message);
+                return 1;
+            }
+        }
+        cfg.dex.safe.key = key;
+
+        char addr_hex[43];
+        tb_addr_to_hex(&key.address, addr_hex, sizeof(addr_hex));
+        printf("ключ бота: %s\n", addr_hex);
+        if (print_addr)
+            return 0; /* только адрес — для добавления в Safe */
     }
 
     app_t app = {0};
@@ -580,10 +634,11 @@ int main(int argc, char **argv)
     tb_u256_t bal = tb_wallet_balance(wallet, &cfg.weth);
     tb_u256_t pnl;
     bool have = tb_u256_sub(&pnl, &bal, &start);
-    char pnl_s[80], bal_s[80];
+    char pnl_s[80], bal_s[80], start_s[80];
     tb_u256_t zero = tb_u256_from_u64(0);
     eth_str(have ? &pnl : &zero, pnl_s, sizeof(pnl_s));
     eth_str(&bal, bal_s, sizeof(bal_s));
+    eth_str(&start, start_s, sizeof(start_s));
 
     printf("\n================= ИТОГИ =================\n");
     printf("Опросы: %llu | котировок собрано: %llu | отсеяно фильтрами: "
@@ -607,16 +662,19 @@ int main(int argc, char **argv)
     printf("RPC: quote-вызовы %llu, exec-вызовы %llu\n",
            (unsigned long long)dq->rpc_calls,
            (unsigned long long)ds->rpc_calls);
-    printf("Кошелёк WETH: %s (старт 5.0)\n", bal_s);
+    printf("Кошелёк WETH: %s (старт %s)\n", bal_s, start_s);
     printf(have ? "Виртуальный PnL: %s ETH\n"
                 : "Виртуальный PnL: −%s ETH (баланс ниже старта)\n",
            pnl_s);
     printf("Журнал: %s\n", ledger_path);
 
+    /* Порядок разборки: сначала цикл — join воркеров, иначе цитировщик
+     * ещё в блокирующем RPC, а бэкенды под ним уже освобождены
+     * (краш в venue_by_pool). Дальше — то, чем пользовались воркеры. */
+    tb_loop_destroy(app.loop);
     tb_arb_destroy(arb);
     tb_exec_destroy(engine);
     tb_ledger_close(ledger);
-    tb_loop_destroy(app.loop);
     tb_http_destroy(http);
     if (replay)
         mock_stop(&app.mock);
