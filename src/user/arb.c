@@ -655,3 +655,9 @@ const tb_arb_stats_t *tb_arb_stats(const tb_arb_t *a)
 {
     return a ? &a->stats : NULL;
 }
+
+/* Статистика RPC собственного цитировщика модуля (опрашивает пулы). */
+const tb_exec_dex_stats_t *tb_arb_quote_stats(const tb_arb_t *a)
+{
+    return a ? tb_exec_dex_stats(&a->dexb) : NULL;
+}

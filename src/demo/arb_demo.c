@@ -494,10 +494,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* ---- бэкенды: один на исполнение (движок), один на котировки (arb) */
-    tb_exec_backend_t dexb_exec, dexb_quot;
-    if (tb_exec_dex_init(&dexb_exec, http, &cfg.dex, &err) != 0
-        || tb_exec_dex_init(&dexb_quot, http, &cfg.dex, &err) != 0) {
+    /* ---- бэкенд исполнения (движок); котировщик — свой внутри tb_arb ---- */
+    tb_exec_backend_t dexb_exec;
+    if (tb_exec_dex_init(&dexb_exec, http, &cfg.dex, &err) != 0) {
         fprintf(stderr, "dex-бэкенд: %s\n", err.message);
         return 1;
     }
@@ -606,11 +605,17 @@ int main(int argc, char **argv)
         }
     }
 
-    printf("арбитраж: %u пулов, период %llu мс, минимум %llu wei, верх "
-           "контракта %llu wei\n",
-           cfg.pools_n, (unsigned long long)cfg.poll_ms,
-           (unsigned long long)cfg.min_trade_wei,
-           (unsigned long long)cfg.max_trade_wei);
+    {
+        char mn[40], mx[40];
+        tb_u256_t v = tb_u256_from_u64(cfg.min_trade_wei);
+        eth_str(&v, mn, sizeof(mn));
+        v = tb_u256_from_u64(cfg.max_trade_wei);
+        eth_str(&v, mx, sizeof(mx));
+        printf("арбитраж: %u пулов (%u бирж), период %llu мс, минимум %s ETH, "
+               "верх контракта %s ETH\n",
+               cfg.pools_n, cfg.dex.venues_n,
+               (unsigned long long)cfg.poll_ms, mn, mx);
+    }
 
     /* ---- прогон ---- */
     if (duration_ms > 0)
@@ -629,7 +634,8 @@ int main(int argc, char **argv)
     const tb_arb_stats_t *as = tb_arb_stats(arb);
     const tb_exec_stats_t *es = tb_exec_stats(engine);
     const tb_exec_dex_stats_t *ds = tb_exec_dex_stats(&dexb_exec);
-    const tb_exec_dex_stats_t *dq = tb_exec_dex_stats(&dexb_quot);
+    const tb_exec_dex_stats_t *dq = tb_arb_quote_stats(arb); /* реальный
+        цитировщик: свои eth_call к QuoterV2 (у арбитража свой экземпляр) */
 
     tb_u256_t bal = tb_wallet_balance(wallet, &cfg.weth);
     tb_u256_t pnl;

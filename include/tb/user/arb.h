@@ -196,6 +196,9 @@ void tb_arb_stop(tb_arb_t *a);
 
 const tb_arb_stats_t *tb_arb_stats(const tb_arb_t *a);
 
+/* Статистика RPC цитировщика модуля: реальные eth_call к QuoterV2. */
+const tb_exec_dex_stats_t *tb_arb_quote_stats(const tb_arb_t *a);
+
 #ifdef __cplusplus
 }
 #endif
