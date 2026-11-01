@@ -31,6 +31,15 @@ static const tb_error_meta_t tb_builtin_meta[] = {
     { TB_DOMAIN_SCHED, TB_SCHED_SHUTDOWN,       "TB_SCHED_SHUTDOWN",       TB_SEV_WARN,  false, "цикл останавливается" },
     { TB_DOMAIN_SCHED, TB_SCHED_POOL_CLOSED,    "TB_SCHED_POOL_CLOSED",    TB_SEV_WARN,  false, "пул потоков закрыт" },
     { TB_DOMAIN_SCHED, TB_SCHED_TOO_MANY_WATCH, "TB_SCHED_TOO_MANY_WATCH", TB_SEV_ERROR, false, "исчерпан лимит наблюдений fd" },
+    /* NET — транспорт HTTP/TLS */
+    { TB_DOMAIN_NET, TB_NET_OK,       "TB_NET_OK",       TB_SEV_INFO,  false, "успех" },
+    { TB_DOMAIN_NET, TB_NET_DNS,      "TB_NET_DNS",      TB_SEV_WARN,  true,  "резолв хоста не удался" },
+    { TB_DOMAIN_NET, TB_NET_CONNECT,  "TB_NET_CONNECT",  TB_SEV_WARN,  true,  "соединение не установлено" },
+    { TB_DOMAIN_NET, TB_NET_TLS,      "TB_NET_TLS",      TB_SEV_ERROR, true,  "TLS-рукопожатие или сертификат отклонён" },
+    { TB_DOMAIN_NET, TB_NET_TIMEOUT,  "TB_NET_TIMEOUT",  TB_SEV_WARN,  true,  "таймаут чтения/записи" },
+    { TB_DOMAIN_NET, TB_NET_BAD_URL,  "TB_NET_BAD_URL",  TB_SEV_ERROR, false, "url не разобран" },
+    { TB_DOMAIN_NET, TB_NET_RESPONSE, "TB_NET_RESPONSE", TB_SEV_ERROR, false, "ответ не соответствует HTTP" },
+    { TB_DOMAIN_NET, TB_NET_CLOSED,   "TB_NET_CLOSED",   TB_SEV_WARN,  true,  "соединение закрыто до полного ответа" },
     /* LEDGER */
     { TB_DOMAIN_LEDGER, TB_LEDGER_OK,       "TB_LEDGER_OK",       TB_SEV_INFO,  false, "успех" },
     { TB_DOMAIN_LEDGER, TB_LEDGER_IO,       "TB_LEDGER_IO",       TB_SEV_ERROR, false, "ошибка записи журнала" },

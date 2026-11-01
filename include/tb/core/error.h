@@ -89,6 +89,17 @@ typedef enum {
 } tb_sched_code_t;
 
 typedef enum {
+    TB_NET_OK       = 0,
+    TB_NET_DNS      = 1,   /* резолв хоста не удался */
+    TB_NET_CONNECT  = 2,   /* соединение не установлено (отказ/таймаут connect) */
+    TB_NET_TLS      = 3,   /* TLS-рукопожатие или проверка сертификата */
+    TB_NET_TIMEOUT  = 4,   /* таймаут чтения/записи */
+    TB_NET_BAD_URL  = 5,   /* url не разобран */
+    TB_NET_RESPONSE = 6,   /* ответ сервера не соответствует HTTP */
+    TB_NET_CLOSED   = 7    /* соединение закрыто до полного ответа */
+} tb_net_code_t;
+
+typedef enum {
     TB_LEDGER_OK       = 0,
     TB_LEDGER_IO       = 1,
     TB_LEDGER_BAD_JSON = 2,

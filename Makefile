@@ -65,16 +65,18 @@ CORE_SRC := \
   src/exec/engine.c
 
 RUNTIME_SRC := src/json/envelope.cpp
+NET_SRC     := src/net/http.c
 
 CORE_OBJ   := $(addprefix $(BUILD)/,$(CORE_SRC:.c=.o))
 RUNTIME_OBJ:= $(addprefix $(BUILD)/,$(RUNTIME_SRC:.cpp=.o))
+NET_OBJ    := $(addprefix $(BUILD)/,$(NET_SRC:.c=.o))
 DEMO_OBJ   := $(BUILD)/src/demo/bot_demo.o
 EVTDEMO_OBJ:= $(BUILD)/src/demo/events_demo.o
 EXECDEMO_OBJ:= $(BUILD)/src/demo/exec_demo.o
 
 TEST_C_BINS  := test_error test_registry test_arch test_pqueue test_timer \
         test_backoff test_runtime test_events test_ledger test_loop \
-        test_u256 test_route test_wallet
+        test_u256 test_route test_wallet test_net
 TEST_CXX_BINS:= test_envelope test_exec
 TEST_BINS    := $(TEST_C_BINS) $(TEST_CXX_BINS)
 
@@ -116,6 +118,10 @@ $(BUILD)/libtb_runtime.a: $(RUNTIME_OBJ)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
+$(BUILD)/libtb_net.a: $(NET_OBJ) | $(BUILD)/libmbed_tls.a
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
 $(BUILD)/bot_demo: $(DEMO_OBJ) $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $(DEMO_OBJ) $(BUILD)/libtb_runtime.a $(BUILD)/libtb_core.a $(LDFLAGS)
@@ -136,6 +142,11 @@ $(BUILD)/tests/test_exec: tests/test_exec.cpp $(BUILD)/libtb_core.a $(BUILD)/lib
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(BUILD)/libtb_runtime.a $(BUILD)/libtb_core.a $(LDFLAGS)
 
+# test_net — единственный тест транспорта: тянет tb_net + mbedTLS
+$(BUILD)/tests/test_net: tests/test_net.c $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libmbed_tls.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+
 $(BUILD)/tests/test_%: tests/test_%.c $(BUILD)/libtb_core.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILD)/libtb_core.a $(LDFLAGS)
@@ -143,6 +154,10 @@ $(BUILD)/tests/test_%: tests/test_%.c $(BUILD)/libtb_core.a
 $(BUILD)/src/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD)/src/net/http.o: src/net/http.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -c -o $@ $<
 
 $(BUILD)/src/%.o: src/%.cpp
 	@mkdir -p $(dir $@)

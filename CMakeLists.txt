@@ -84,6 +84,15 @@ target_include_directories(tb_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(tb_core PUBLIC Threads::Threads m)
 
 # ---------------------------------------------------------------------------
+#  tb_net — HTTP-транспорт (net + replay), TLS через вендоренный mbedTLS
+# ---------------------------------------------------------------------------
+add_library(tb_net STATIC
+  src/net/http.c
+)
+target_include_directories(tb_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(tb_net PUBLIC tb_core mbedtls mbedx509 mbedcrypto)
+
+# ---------------------------------------------------------------------------
 #  tb_runtime — C++20-обвязка (готовый rapidjson вендорится в third_party)
 # ---------------------------------------------------------------------------
 add_library(tb_runtime STATIC
@@ -133,6 +142,7 @@ set(TB_C_TESTS
   test_u256
   test_route
   test_wallet
+  test_net
 )
 foreach(name IN LISTS TB_C_TESTS)
   add_executable(${name} tests/${name}.c)
@@ -140,6 +150,7 @@ foreach(name IN LISTS TB_C_TESTS)
   add_test(NAME ${name} COMMAND ${name})
   set_tests_properties(${name} PROPERTIES TIMEOUT 30)
 endforeach()
+target_link_libraries(test_net PRIVATE tb_net)
 
 add_executable(test_envelope tests/test_envelope.cpp)
 target_link_libraries(test_envelope PRIVATE tb_runtime)
