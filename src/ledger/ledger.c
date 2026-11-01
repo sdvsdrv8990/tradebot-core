@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_LEDGER /* зона ответственности файла */
 /* ==========================================================================
  *  tb/ledger/ledger.c — JSONL-журнал событий с дедупликацией.
  * ========================================================================== */
@@ -112,7 +113,7 @@ tb_ledger_t *tb_ledger_open(const char *path, unsigned flags, tb_error_t *err)
 {
     tb_ledger_t *led = calloc(1, sizeof(tb_ledger_t));
     if (!led) {
-        tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY,
                      "ledger: нет памяти");
         return NULL;
     }
@@ -123,13 +124,13 @@ tb_ledger_t *tb_ledger_open(const char *path, unsigned flags, tb_error_t *err)
         led->path = strdup(path);
         if (!led->path) {
             free(led);
-            tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, TB_LOC,
+            TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY,
                          "ledger: нет памяти на путь");
             return NULL;
         }
         led->fp = fopen(path, "a+"); /* append + читаемость для сканирования */
         if (!led->fp) {
-            tb_error_set(err, TB_DOMAIN_LEDGER, TB_LEDGER_IO, TB_LOC,
+            TB_ERROR_SET(err, TB_DOMAIN_LEDGER, TB_LEDGER_IO,
                          "ledger: не открыть '%s'", path);
             free(led->path);
             free(led);
@@ -143,7 +144,7 @@ tb_ledger_t *tb_ledger_open(const char *path, unsigned flags, tb_error_t *err)
 
     if (!dedup_init(&led->dedup, TB_LEDGER_DEDUP_WINDOW)) {
         tb_ledger_close(led);
-        tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY,
                      "ledger: нет памяти на окно дедупликации");
         return NULL;
     }
@@ -167,13 +168,13 @@ int tb_ledger_emit(tb_ledger_t *ledger, const char *type,
                    uint64_t *out_event_id, tb_error_t *err)
 {
     if (!ledger || !type || !payload_json) {
-        tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
                      "ledger: emit требует type и payload");
         return -1;
     }
     size_t plen;
     if (!payload_ok(payload_json, &plen)) {
-        tb_error_set(err, TB_DOMAIN_LEDGER, TB_LEDGER_BAD_JSON, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_LEDGER, TB_LEDGER_BAD_JSON,
                      "ledger: payload не похож на JSON без переводов строк");
         return -1;
     }
@@ -184,7 +185,7 @@ int tb_ledger_emit(tb_ledger_t *ledger, const char *type,
         uint64_t h = tb_hash64(uuid, strlen(uuid), 0xA5A5A5A5A5A5A5A5ull);
         if (dedup_seen_or_add(&ledger->dedup, h, &overflowed)) {
             ledger->stats.events_duplicate++;
-            tb_error_set(err, TB_DOMAIN_LEDGER, TB_LEDGER_DUP, TB_LOC,
+            TB_ERROR_SET(err, TB_DOMAIN_LEDGER, TB_LEDGER_DUP,
                          "ledger: дубликат пропущен (uuid=%s)", uuid);
             if (out_event_id) *out_event_id = 0;
             return 0;
@@ -214,7 +215,7 @@ int tb_ledger_emit(tb_ledger_t *ledger, const char *type,
                      type, payload_json);
     if (n < 0 || (size_t)n >= sizeof(line)) {
         ledger->next_event_id--; /* id не потрачен */
-        tb_error_set(err, TB_DOMAIN_LEDGER, TB_CORE_OVERFLOW, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_LEDGER, TB_CORE_OVERFLOW,
                      "ledger: строка события не влезает в буфер");
         return -1;
     }
@@ -222,7 +223,7 @@ int tb_ledger_emit(tb_ledger_t *ledger, const char *type,
     if (ledger->fp) {
         size_t written = fwrite(line, 1, (size_t)n, ledger->fp);
         if (written != (size_t)n) {
-            tb_error_set(err, TB_DOMAIN_LEDGER, TB_LEDGER_IO, TB_LOC,
+            TB_ERROR_SET(err, TB_DOMAIN_LEDGER, TB_LEDGER_IO,
                          "ledger: запись в '%s' не удалась",
                          ledger->path ? ledger->path : "?");
             return -1;

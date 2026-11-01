@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_SCHED /* зона ответственности файла */
 /* ==========================================================================
  *  tb/sched/loop.c — событийный цикл: epoll + eventfd + таймерное колесо.
  * ========================================================================== */
@@ -170,7 +171,7 @@ tb_loop_t *tb_loop_create(int pool_threads, tb_error_t *err)
 {
     tb_loop_t *loop = calloc(1, sizeof(tb_loop_t));
     if (!loop) {
-        tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY,
                      "loop: нет памяти");
         return NULL;
     }
@@ -180,7 +181,7 @@ tb_loop_t *tb_loop_create(int pool_threads, tb_error_t *err)
     loop->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     loop->wakeup_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (loop->epoll_fd < 0 || loop->wakeup_fd < 0) {
-        tb_error_set(err, TB_DOMAIN_SCHED, TB_CORE_IO, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_SCHED, TB_CORE_IO,
                      "loop: epoll/eventfd недоступны");
         tb_loop_destroy(loop);
         return NULL;
@@ -188,7 +189,7 @@ tb_loop_t *tb_loop_create(int pool_threads, tb_error_t *err)
 
     struct epoll_event ev = { .events = EPOLLIN, .data.u32 = 0 };
     if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, loop->wakeup_fd, &ev) != 0) {
-        tb_error_set(err, TB_DOMAIN_SCHED, TB_CORE_IO, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_SCHED, TB_CORE_IO,
                      "loop: не удалось зарегистрировать wakeup fd");
         tb_loop_destroy(loop);
         return NULL;
@@ -197,7 +198,7 @@ tb_loop_t *tb_loop_create(int pool_threads, tb_error_t *err)
     if (!tb_pqueue_init(&loop->ready, tb_task_cmp_ready, 256) ||
         !tb_timerwheel_init(&loop->wheel) ||
         !tb_task_table_init(&loop->active, 12 /* 4096 задач */)) {
-        tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY,
                      "loop: инициализация контейнеров");
         tb_loop_destroy(loop);
         return NULL;

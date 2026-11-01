@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_CORE /* зона ответственности файла */
 /* ==========================================================================
  *  tb/core/alloc.c — arena-аллокатор.
  * ========================================================================== */
@@ -33,7 +34,7 @@ tb_arena_t *tb_arena_create(size_t block_size, tb_error_t *err)
     if (block_size == 0) block_size = TB_ARENA_DEFAULT_BLOCK;
     tb_arena_t *a = calloc(1, sizeof(tb_arena_t));
     if (!a) {
-        tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY,
                      "arena: нет памяти под дескриптор");
         return NULL;
     }

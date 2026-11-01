@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_DEMO /* зона ответственности файла */
 /* ==========================================================================
  *  demo/bot_demo.c — демонстрация ядра v0.1 на симуляторе опроса источников.
  *
@@ -237,7 +238,7 @@ static void demo_on_response(tb_loop_t *loop, void *arg)
         p->attempt = 0;
         tb_breaker_success(&p->breaker);
     } else {
-        tb_error_wrap(&err, TB_LOC, "provider=%s op=%s", p->name, p->operation);
+        TB_ERROR_WRAP(&err, "provider=%s op=%s", p->name, p->operation);
         tb_report(&err); /* глобальный обработчик: счётчики + журнал */
         tb_envelope_set_error(&env, &err);
         p->attempt++;
@@ -302,7 +303,7 @@ static void demo_poll(tb_loop_t *loop, tb_task_t *task, void *arg)
         p->circuit_rejected++;
 
         tb_error_t err = TB_ERROR_INIT;
-        tb_error_set(&err, TB_DOMAIN_API, TB_API_CIRCUIT_OPEN, TB_LOC,
+        TB_ERROR_SET(&err, TB_DOMAIN_API, TB_API_CIRCUIT_OPEN,
                      "%s: предохранитель разомкнут, проба через %llu мс",
                      p->name, (unsigned long long)wait);
         tb_report(&err);

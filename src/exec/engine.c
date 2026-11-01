@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_EXEC /* зона ответственности файла */
 /* ==========================================================================
  *  tb/exec/engine.c — механизм торговли: конвейер исполнения сделок.
  *
@@ -107,7 +108,7 @@ static tb_ev_action_t fail_with(tb_event_t *ev, uint32_t code,
     va_end(ap);
 
     tb_error_t err = TB_ERROR_INIT;
-    tb_error_set(&err, TB_DOMAIN_USER, code, TB_LOC, "%s", msg);
+    TB_ERROR_SET(&err, TB_DOMAIN_USER, code, "%s", msg);
     tb_event_attach(ev, &err);
     return TB_EV_ACT_FAIL;
 }
@@ -215,12 +216,14 @@ static void record_trade(tb_exec_engine_t *e, tb_event_t *ev, exec_ctx_t *c,
                      "\"operation\":\"swap_exact_in\",\"status\":\"ERROR\","
                      "\"request_id\":%llu,\"timestamp\":%llu,\"data\":null,"
                      "\"error\":{\"code\":\"%s\",\"domain\":\"%s\","
+                     "\"group\":\"%s\","
                      "\"severity\":\"%s\",\"retryable\":%s,"
                      "\"retry_after_ms\":%u,\"message\":\"%s\"}}",
                      e->backend.name, (unsigned long long)ev->id,
                      (unsigned long long)tb_wall_ms(),
                      meta ? meta->name : "UNKNOWN",
                      tb_domain_name(err ? err->domain : 0),
+                     tb_group_name(err ? err->group : TB_G_UNASSIGNED),
                      tb_severity_name((tb_severity_t)(err ? err->severity : 0)),
                      (err && err->retryable) ? "true" : "false",
                      err ? err->retry_after_ms : 0, msg_esc);
@@ -650,7 +653,7 @@ static tb_ev_action_t step_commit(tb_evreg_t *r, tb_event_t *ev, void *user)
         /* Слот не закрыт — откатываем, чтобы не утек. */
         tb_slot_rollback(c->slot);
         c->slot = NULL;
-        tb_error_wrap(&err, TB_LOC, "фиксация слота ордера %llu",
+        TB_ERROR_WRAP(&err, "фиксация слота ордера %llu",
                       (unsigned long long)c->order_no);
         tb_event_attach(ev, &err);
         return TB_EV_ACT_FAIL;
@@ -706,7 +709,7 @@ static void exec_observer(tb_evreg_t *r, tb_event_t *ev, void *user)
         }
         e->stats.canceled++;
         tb_error_t cerr = TB_ERROR_INIT;
-        tb_error_set(&cerr, TB_DOMAIN_API, TB_API_CANCELED, TB_LOC,
+        TB_ERROR_SET(&cerr, TB_DOMAIN_API, TB_API_CANCELED,
                      "ордер отменён владельцем до исполнения");
         record_trade(e, ev, c, "trade.canceled", 1, NULL, &cerr,
                      ev->attempts, -1);

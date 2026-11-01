@@ -59,6 +59,7 @@ add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
 add_library(tb_core STATIC
   src/core/error.c
   src/core/error_registry.c
+  src/core/ids.c
   src/core/log.c
   src/core/time.c
   src/core/alloc.c
@@ -174,6 +175,7 @@ set(TB_C_TESTS
   test_filters
   test_decision
   test_config
+  test_ids
 )
 foreach(name IN LISTS TB_C_TESTS)
   add_executable(${name} tests/${name}.c)

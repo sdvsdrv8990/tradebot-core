@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_CORE /* зона ответственности файла */
 /* ==========================================================================
  *  tb/core/error.c — реализация ядра обработки ошибок.
  *
@@ -58,12 +59,14 @@ bool tb_error_is_set(const tb_error_t *err)
     return err && (err->domain != TB_DOMAIN_NONE || err->code != 0);
 }
 
-static void error_setv(tb_error_t *err, uint8_t domain, uint32_t code,
-                       const char *location, const char *fmt, va_list ap)
+static void error_setv(tb_error_t *err, uint16_t group, uint8_t domain,
+                       uint32_t code, const char *location, const char *fmt,
+                       va_list ap)
 {
     tb_error_t fresh;
     memset(&fresh, 0, sizeof(fresh));
     fresh.domain = domain;
+    fresh.group  = group;
     fresh.code   = code;
     tb_registry_decorate(&fresh);
     if (fmt) {
@@ -75,25 +78,32 @@ static void error_setv(tb_error_t *err, uint8_t domain, uint32_t code,
     *err = fresh; /* POD: присваивание целиком, без владения */
 }
 
+void tb_error_set_g(tb_error_t *err, uint16_t group, uint8_t domain,
+                    uint32_t code, const char *location, const char *fmt, ...)
+{
+    va_list ap;
+    if (!err) return;
+    va_start(ap, fmt);
+    error_setv(err, group, domain, code, location, fmt, ap);
+    va_end(ap);
+}
+
 void tb_error_set(tb_error_t *err, uint8_t domain, uint32_t code,
                   const char *location, const char *fmt, ...)
 {
     va_list ap;
     if (!err) return;
     va_start(ap, fmt);
-    error_setv(err, domain, code, location, fmt, ap);
+    error_setv(err, TB_G_UNASSIGNED, domain, code, location, fmt, ap);
     va_end(ap);
 }
 
-void tb_error_wrap(tb_error_t *err, const char *location, const char *fmt, ...)
+/* Обогащение: addend в начало сообщения, location в начало цепочки. */
+static void error_wrapv(tb_error_t *err, const char *location, const char *fmt,
+                        va_list ap)
 {
-    if (!err || !tb_error_is_set(err)) return;
-
     char addend[TB_ERROR_MSG_MAX];
-    va_list ap;
-    va_start(ap, fmt);
     vsnprintf(addend, sizeof(addend), fmt, ap);
-    va_end(ap);
     tb_utf8_fit(addend, sizeof(addend));
 
     char orig[TB_ERROR_MSG_MAX];
@@ -109,14 +119,36 @@ void tb_error_wrap(tb_error_t *err, const char *location, const char *fmt, ...)
         char origloc[TB_ERROR_LOC_MAX];
         memcpy(origloc, err->location, sizeof(origloc));
         if (origloc[0] != '\0')
-            snprintf(err->location, sizeof(err->location), "%s <- %s", location, origloc);
+            snprintf(err->location, sizeof(err->location), "%s <- %s",
+                     location, origloc);
         else
             snprintf(err->location, sizeof(err->location), "%s", location);
     }
 }
 
-void tb_error_promote(tb_error_t *err, uint8_t domain, uint32_t code,
-                      const char *location, const char *fmt, ...)
+void tb_error_wrap_g(tb_error_t *err, uint16_t group, const char *location,
+                     const char *fmt, ...)
+{
+    va_list ap;
+    if (!err || !tb_error_is_set(err)) return;
+    err->group = group; /* обогативший отвечает за кадр */
+    va_start(ap, fmt);
+    error_wrapv(err, location, fmt, ap);
+    va_end(ap);
+}
+
+void tb_error_wrap(tb_error_t *err, const char *location, const char *fmt, ...)
+{
+    va_list ap;
+    if (!err || !tb_error_is_set(err)) return;
+    va_start(ap, fmt);
+    error_wrapv(err, location, fmt, ap);
+    va_end(ap);
+}
+
+static void error_promotev(tb_error_t *err, uint16_t group, uint8_t domain,
+                           uint32_t code, const char *location, const char *fmt,
+                           va_list ap)
 {
     if (!err) return;
 
@@ -125,17 +157,15 @@ void tb_error_promote(tb_error_t *err, uint8_t domain, uint32_t code,
     memcpy(orig, err->message, sizeof(orig));
     memcpy(origloc, err->location, sizeof(origloc));
 
-    va_list ap;
-    va_start(ap, fmt);
-    error_setv(err, domain, code, location, fmt, ap);
-    va_end(ap);
+    error_setv(err, group, domain, code, location, fmt, ap);
 
     /* Прежнее сообщение сохраняется следом. */
     if (orig[0] != '\0') {
         char fresh[TB_ERROR_MSG_MAX];
         memcpy(fresh, err->message, sizeof(fresh));
         if (fresh[0] != '\0')
-            snprintf(err->message, sizeof(err->message), "%s <- %s", fresh, orig);
+            snprintf(err->message, sizeof(err->message), "%s <- %s", fresh,
+                     orig);
         else
             snprintf(err->message, sizeof(err->message), "%s", orig);
         tb_utf8_fit(err->message, sizeof(err->message));
@@ -144,10 +174,30 @@ void tb_error_promote(tb_error_t *err, uint8_t domain, uint32_t code,
         char freshloc[TB_ERROR_LOC_MAX];
         memcpy(freshloc, err->location, sizeof(freshloc));
         if (freshloc[0] != '\0')
-            snprintf(err->location, sizeof(err->location), "%s <- %s", freshloc, origloc);
+            snprintf(err->location, sizeof(err->location), "%s <- %s",
+                     freshloc, origloc);
         else
             snprintf(err->location, sizeof(err->location), "%s", origloc);
     }
+}
+
+void tb_error_promote_g(tb_error_t *err, uint16_t group, uint8_t domain,
+                        uint32_t code, const char *location, const char *fmt,
+                        ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    error_promotev(err, group, domain, code, location, fmt, ap);
+    va_end(ap);
+}
+
+void tb_error_promote(tb_error_t *err, uint8_t domain, uint32_t code,
+                      const char *location, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    error_promotev(err, TB_G_UNASSIGNED, domain, code, location, fmt, ap);
+    va_end(ap);
 }
 
 size_t tb_error_format(const tb_error_t *err, char *buf, size_t cap)
@@ -162,7 +212,12 @@ size_t tb_error_format(const tb_error_t *err, char *buf, size_t cap)
     } while (0)
 
     const tb_error_meta_t *meta = tb_registry_meta(err->domain, err->code);
-    TB_APPEND("[%s/%s", tb_domain_name(err->domain), meta ? meta->name : "?");
+    if (err->group != TB_G_UNASSIGNED)
+        TB_APPEND("[%s:%s/%s", tb_domain_name(err->domain),
+                  tb_group_name(err->group), meta ? meta->name : "?");
+    else
+        TB_APPEND("[%s/%s", tb_domain_name(err->domain),
+                  meta ? meta->name : "?");
     if (err->http_status > 0)
         TB_APPEND("|HTTP %d", err->http_status);
     if (err->retry_after_ms > 0)

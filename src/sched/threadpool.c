@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_POOL /* зона ответственности файла */
 /* ==========================================================================
  *  tb/sched/threadpool.c — пул воркеров блокирующих операций.
  * ========================================================================== */
@@ -98,19 +99,19 @@ static void *worker_main(void *p)
 tb_threadpool_t *tb_threadpool_create(int threads, tb_error_t *err)
 {
     if (threads <= 0) {
-        tb_error_set(err, TB_DOMAIN_SCHED, TB_CORE_INVALID_ARG, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_SCHED, TB_CORE_INVALID_ARG,
                      "pool: threads > 0 обязателен");
         return NULL;
     }
     tb_threadpool_t *pool = calloc(1, sizeof(tb_threadpool_t));
     if (!pool) {
-        tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, TB_LOC, "pool: нет памяти");
+        TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "pool: нет памяти");
         return NULL;
     }
     pool->threads = calloc((size_t)threads, sizeof(pthread_t));
     if (!pool->threads) {
         free(pool);
-        tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, TB_LOC, "pool: нет памяти");
+        TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "pool: нет памяти");
         return NULL;
     }
     pthread_mutex_init(&pool->lock, NULL);
@@ -120,7 +121,7 @@ tb_threadpool_t *tb_threadpool_create(int threads, tb_error_t *err)
         if (pthread_create(&pool->threads[i], NULL, worker_main, pool) != 0) {
             pool->nthreads = (size_t)i;
             tb_threadpool_destroy(pool);
-            tb_error_set(err, TB_DOMAIN_SCHED, TB_CORE_IO, TB_LOC,
+            TB_ERROR_SET(err, TB_DOMAIN_SCHED, TB_CORE_IO,
                          "pool: не удалось создать поток %d", i);
             return NULL;
         }

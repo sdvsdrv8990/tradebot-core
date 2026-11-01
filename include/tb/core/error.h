@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "tb/core/ids.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -131,6 +132,8 @@ typedef enum {
  * указателей — это делает значение безопасным к нулевой инициализации. */
 typedef struct tb_error {
     uint8_t   domain;           /* tb_domain_t */
+    uint16_t  group;            /* tb_group_id_t: кто сообщил (зона
+                                 * ответственности); 0 = не задан */
     uint32_t  code;             /* код внутри домена */
     uint8_t   severity;         /* tb_severity_t (по умолчанию — из реестра) */
     bool      retryable;        /* имеет ли смысл повторять операцию */
@@ -148,18 +151,29 @@ bool tb_error_is_set(const tb_error_t *err);
 
 /* Основной конструктор. Метаданные (severity, retryable) берутся из реестра.
  * location — обычно TB_LOC из макроса. Полностью замещает прежнее
- * состояние err (сообщение и след контекста). */
+ * состояние err (сообщение и след контекста). Вариант _g несёт группу-
+ * владельца (кто сообщил); без группы — TB_G_UNASSIGNED. */
+void tb_error_set_g(tb_error_t *err, uint16_t group, uint8_t domain,
+                    uint32_t code, const char *location, const char *fmt, ...)
+    __attribute__((format(printf, 6, 7)));
 void tb_error_set(tb_error_t *err, uint8_t domain, uint32_t code,
                   const char *location, const char *fmt, ...)
     __attribute__((format(printf, 5, 6)));
 
 /* Обогащение контекстом без смены кода: текст добавляется в начало
- * сообщения, location обновляется. Используется при пробросе вверх. */
+ * сообщения, location обновляется, группа — на обогатившего (кто
+ * пробрасывает вверх, тот и отвечает за кадр). */
+void tb_error_wrap_g(tb_error_t *err, uint16_t group, const char *location,
+                     const char *fmt, ...)
+    __attribute__((format(printf, 4, 5)));
 void tb_error_wrap(tb_error_t *err, const char *location, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 
 /* Поднятие новой ошибки поверх существующей: старое сообщение сохраняется
  * в следе («новое <- прежнее»), домен/код меняются на новые. */
+void tb_error_promote_g(tb_error_t *err, uint16_t group, uint8_t domain,
+                        uint32_t code, const char *location, const char *fmt, ...)
+    __attribute__((format(printf, 6, 7)));
 void tb_error_promote(tb_error_t *err, uint8_t domain, uint32_t code,
                       const char *location, const char *fmt, ...)
     __attribute__((format(printf, 5, 6)));
@@ -173,10 +187,26 @@ size_t tb_error_format(const tb_error_t *err, char *buf, size_t cap);
 #define TB_STRINGIFY(x)  TB_STRINGIFY2(x)
 #define TB_LOC           __FILE__ ":" TB_STRINGIFY(__LINE__)
 
+/* Группа-владелец текущего файла: объявляется ПЕРВОЙ строкой .c до всех
+ * include. Не переопределяется после подключения error.h — поэтому
+ * правило: #define TB_CURRENT_GROUP TB_G_... в шапке файла. */
+#ifndef TB_CURRENT_GROUP
+#define TB_CURRENT_GROUP TB_G_UNASSIGNED
+#endif
+
 #define TB_ERROR_SET(err, domain, code, ...) \
-    tb_error_set((err), (domain), (code), TB_LOC, __VA_ARGS__)
-#define TB_ERROR_FAIL(err, domain, code, ...) \
-    do { TB_ERROR_SET((err), (domain), (code), __VA_ARGS__); return -1; } while (0)
+    tb_error_set_g((err), TB_CURRENT_GROUP, (domain), (code), TB_LOC,       \
+                   __VA_ARGS__)
+#define TB_ERROR_FAIL(err, domain, code, ...)                                \
+    do {                                                                     \
+        TB_ERROR_SET((err), (domain), (code), __VA_ARGS__);                  \
+        return -1;                                                           \
+    } while (0)
+#define TB_ERROR_WRAP(err, ...) \
+    tb_error_wrap_g((err), TB_CURRENT_GROUP, TB_LOC, __VA_ARGS__)
+#define TB_ERROR_PROMOTE(err, domain, code, ...) \
+    tb_error_promote_g((err), TB_CURRENT_GROUP, (domain), (code), TB_LOC,    \
+                       __VA_ARGS__)
 
 /* ---- Глобальный обработчик на всё приложение ----
  * Любой компонент может сообщить об ошибке через tb_report(): обработчик

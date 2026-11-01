@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_BUILTINS /* зона ответственности файла */
 /* ==========================================================================
  *  tb/events/builtins.c — готовые шаги-шлюзы и наблюдатель журнала.
  * ========================================================================== */
@@ -146,7 +147,8 @@ static void ledger_observer(tb_evreg_t *r, tb_event_t *ev, void *user)
         n = snprintf(payload, sizeof(payload),
                      "{\"reg_event\":%llu,\"kind\":%u,\"state\":\"%s\","
                      "\"attempts\":%u,\"steps\":%u,\"wake_at_ms\":%llu,"
-                     "\"error\":{\"domain\":\"%s\",\"code\":\"%s\","
+                     "\"error\":{\"domain\":\"%s\",\"group\":\"%s\","
+                     "\"code\":\"%s\","
                      "\"severity\":\"%s\",\"retryable\":%s,"
                      "\"http_status\":%d,\"retry_after_ms\":%u,\"message\":\"%s\"},"
                      "\"trace\":\"%s\"}",

@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_DEX /* зона ответственности файла */
 /* ==========================================================================
  *  tb/exec/backend_dex.c — живой DEX-адаптер: QuoterV2 через eth_call.
  *
@@ -300,7 +301,7 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
         fprintf(stderr, "[dex] result hex (rlen=%zu): %.134s\n", rlen, res);
     if (hex_to_u256(out, res, rlen > 66 ? 66 : rlen, err) != 0) {
         c->stats.rpc_errors++;
-        tb_error_wrap(err, TB_LOC, "RPC %s", venue->name);
+        TB_ERROR_WRAP(err, "RPC %s", venue->name);
         goto out;
     }
     if (tb_u256_is_zero(out)) {
@@ -340,7 +341,7 @@ static int dex_quote_route(dex_ctx_t *c, const tb_route_t *route,
         tb_addr_t tout = tb_route_token(route, h + 1);
         if (dex_quote_hop(c, venue, &tin, &tout, tb_route_fee(route, h),
                           &v, out, err) != 0) {
-            tb_error_wrap(err, TB_LOC, "хоп %zu (%s)", h, venue->name);
+            TB_ERROR_WRAP(err, "хоп %zu (%s)", h, venue->name);
             return -1;
         }
         v = *out;

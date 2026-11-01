@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_REGISTRY /* зона ответственности файла */
 /* ==========================================================================
  *  tb/core/error_registry.c — «база данных обработчика»:
  *  канонические метаданные кодов + шаблоны отображения ответов источников.
@@ -18,81 +19,81 @@
 /* ---- Метаданные унифицированных кодов ---- */
 static const tb_error_meta_t tb_builtin_meta[] = {
     /* CORE */
-    { TB_DOMAIN_CORE, TB_CORE_OK,            "TB_CORE_OK",            TB_SEV_INFO,  false, "успех" },
-    { TB_DOMAIN_CORE, TB_CORE_NO_MEMORY,     "TB_CORE_NO_MEMORY",     TB_SEV_FATAL, false, "нехватка памяти" },
-    { TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,   "TB_CORE_INVALID_ARG",   TB_SEV_ERROR, false, "недопустимый аргумент" },
-    { TB_DOMAIN_CORE, TB_CORE_NOT_INIT,      "TB_CORE_NOT_INIT",      TB_SEV_ERROR, false, "компонент не инициализирован" },
-    { TB_DOMAIN_CORE, TB_CORE_UNSUPPORTED,   "TB_CORE_UNSUPPORTED",   TB_SEV_ERROR, false, "операция не поддерживается" },
-    { TB_DOMAIN_CORE, TB_CORE_OVERFLOW,      "TB_CORE_OVERFLOW",      TB_SEV_ERROR, false, "переполнение счётчика/буфера" },
-    { TB_DOMAIN_CORE, TB_CORE_IO,            "TB_CORE_IO",            TB_SEV_ERROR, false, "ошибка ввода-вывода" },
+    { TB_DOMAIN_CORE, TB_G_CORE,          TB_CORE_OK,            "TB_CORE_OK",            TB_SEV_INFO,  false, "успех" },
+    { TB_DOMAIN_CORE, TB_G_CORE,          TB_CORE_NO_MEMORY,     "TB_CORE_NO_MEMORY",     TB_SEV_FATAL, false, "нехватка памяти" },
+    { TB_DOMAIN_CORE, TB_G_CORE,          TB_CORE_INVALID_ARG,   "TB_CORE_INVALID_ARG",   TB_SEV_ERROR, false, "недопустимый аргумент" },
+    { TB_DOMAIN_CORE, TB_G_CORE,          TB_CORE_NOT_INIT,      "TB_CORE_NOT_INIT",      TB_SEV_ERROR, false, "компонент не инициализирован" },
+    { TB_DOMAIN_CORE, TB_G_CORE,          TB_CORE_UNSUPPORTED,   "TB_CORE_UNSUPPORTED",   TB_SEV_ERROR, false, "операция не поддерживается" },
+    { TB_DOMAIN_CORE, TB_G_CORE,          TB_CORE_OVERFLOW,      "TB_CORE_OVERFLOW",      TB_SEV_ERROR, false, "переполнение счётчика/буфера" },
+    { TB_DOMAIN_CORE, TB_G_CORE,          TB_CORE_IO,            "TB_CORE_IO",            TB_SEV_ERROR, false, "ошибка ввода-вывода" },
     /* SCHED */
-    { TB_DOMAIN_SCHED, TB_SCHED_OK,             "TB_SCHED_OK",             TB_SEV_INFO,  false, "успех" },
-    { TB_DOMAIN_SCHED, TB_SCHED_TASK_NOT_FOUND, "TB_SCHED_TASK_NOT_FOUND", TB_SEV_WARN,  false, "задача не найдена (завершена ранее)" },
-    { TB_DOMAIN_SCHED, TB_SCHED_SHUTDOWN,       "TB_SCHED_SHUTDOWN",       TB_SEV_WARN,  false, "цикл останавливается" },
-    { TB_DOMAIN_SCHED, TB_SCHED_POOL_CLOSED,    "TB_SCHED_POOL_CLOSED",    TB_SEV_WARN,  false, "пул потоков закрыт" },
-    { TB_DOMAIN_SCHED, TB_SCHED_TOO_MANY_WATCH, "TB_SCHED_TOO_MANY_WATCH", TB_SEV_ERROR, false, "исчерпан лимит наблюдений fd" },
+    { TB_DOMAIN_SCHED, TB_G_SCHED,         TB_SCHED_OK,             "TB_SCHED_OK",             TB_SEV_INFO,  false, "успех" },
+    { TB_DOMAIN_SCHED, TB_G_SCHED,         TB_SCHED_TASK_NOT_FOUND, "TB_SCHED_TASK_NOT_FOUND", TB_SEV_WARN,  false, "задача не найдена (завершена ранее)" },
+    { TB_DOMAIN_SCHED, TB_G_SCHED,         TB_SCHED_SHUTDOWN,       "TB_SCHED_SHUTDOWN",       TB_SEV_WARN,  false, "цикл останавливается" },
+    { TB_DOMAIN_SCHED, TB_G_SCHED,         TB_SCHED_POOL_CLOSED,    "TB_SCHED_POOL_CLOSED",    TB_SEV_WARN,  false, "пул потоков закрыт" },
+    { TB_DOMAIN_SCHED, TB_G_SCHED,         TB_SCHED_TOO_MANY_WATCH, "TB_SCHED_TOO_MANY_WATCH", TB_SEV_ERROR, false, "исчерпан лимит наблюдений fd" },
     /* NET — транспорт HTTP/TLS */
-    { TB_DOMAIN_NET, TB_NET_OK,       "TB_NET_OK",       TB_SEV_INFO,  false, "успех" },
-    { TB_DOMAIN_NET, TB_NET_DNS,      "TB_NET_DNS",      TB_SEV_WARN,  true,  "резолв хоста не удался" },
-    { TB_DOMAIN_NET, TB_NET_CONNECT,  "TB_NET_CONNECT",  TB_SEV_WARN,  true,  "соединение не установлено" },
-    { TB_DOMAIN_NET, TB_NET_TLS,      "TB_NET_TLS",      TB_SEV_ERROR, true,  "TLS-рукопожатие или сертификат отклонён" },
-    { TB_DOMAIN_NET, TB_NET_TIMEOUT,  "TB_NET_TIMEOUT",  TB_SEV_WARN,  true,  "таймаут чтения/записи" },
-    { TB_DOMAIN_NET, TB_NET_BAD_URL,  "TB_NET_BAD_URL",  TB_SEV_ERROR, false, "url не разобран" },
-    { TB_DOMAIN_NET, TB_NET_RESPONSE, "TB_NET_RESPONSE", TB_SEV_ERROR, false, "ответ не соответствует HTTP" },
-    { TB_DOMAIN_NET, TB_NET_CLOSED,   "TB_NET_CLOSED",   TB_SEV_WARN,  true,  "соединение закрыто до полного ответа" },
+    { TB_DOMAIN_NET, TB_G_NET,           TB_NET_OK,       "TB_NET_OK",       TB_SEV_INFO,  false, "успех" },
+    { TB_DOMAIN_NET, TB_G_NET,           TB_NET_DNS,      "TB_NET_DNS",      TB_SEV_WARN,  true,  "резолв хоста не удался" },
+    { TB_DOMAIN_NET, TB_G_NET,           TB_NET_CONNECT,  "TB_NET_CONNECT",  TB_SEV_WARN,  true,  "соединение не установлено" },
+    { TB_DOMAIN_NET, TB_G_NET,           TB_NET_TLS,      "TB_NET_TLS",      TB_SEV_ERROR, true,  "TLS-рукопожатие или сертификат отклонён" },
+    { TB_DOMAIN_NET, TB_G_NET,           TB_NET_TIMEOUT,  "TB_NET_TIMEOUT",  TB_SEV_WARN,  true,  "таймаут чтения/записи" },
+    { TB_DOMAIN_NET, TB_G_NET,           TB_NET_BAD_URL,  "TB_NET_BAD_URL",  TB_SEV_ERROR, false, "url не разобран" },
+    { TB_DOMAIN_NET, TB_G_NET,           TB_NET_RESPONSE, "TB_NET_RESPONSE", TB_SEV_ERROR, false, "ответ не соответствует HTTP" },
+    { TB_DOMAIN_NET, TB_G_NET,           TB_NET_CLOSED,   "TB_NET_CLOSED",   TB_SEV_WARN,  true,  "соединение закрыто до полного ответа" },
     /* LEDGER */
-    { TB_DOMAIN_LEDGER, TB_LEDGER_OK,       "TB_LEDGER_OK",       TB_SEV_INFO,  false, "успех" },
-    { TB_DOMAIN_LEDGER, TB_LEDGER_IO,       "TB_LEDGER_IO",       TB_SEV_ERROR, false, "ошибка записи журнала" },
-    { TB_DOMAIN_LEDGER, TB_LEDGER_BAD_JSON, "TB_LEDGER_BAD_JSON", TB_SEV_ERROR, false, "некорректный JSON в payload события" },
-    { TB_DOMAIN_LEDGER, TB_LEDGER_DUP,      "TB_LEDGER_DUP",      TB_SEV_INFO,  false, "дубликат события пропущен (дедупликация по uuid)" },
+    { TB_DOMAIN_LEDGER, TB_G_LEDGER,        TB_LEDGER_OK,       "TB_LEDGER_OK",       TB_SEV_INFO,  false, "успех" },
+    { TB_DOMAIN_LEDGER, TB_G_LEDGER,        TB_LEDGER_IO,       "TB_LEDGER_IO",       TB_SEV_ERROR, false, "ошибка записи журнала" },
+    { TB_DOMAIN_LEDGER, TB_G_LEDGER,        TB_LEDGER_BAD_JSON, "TB_LEDGER_BAD_JSON", TB_SEV_ERROR, false, "некорректный JSON в payload события" },
+    { TB_DOMAIN_LEDGER, TB_G_LEDGER,        TB_LEDGER_DUP,      "TB_LEDGER_DUP",      TB_SEV_INFO,  false, "дубликат события пропущен (дедупликация по uuid)" },
     /* JSON */
-    { TB_DOMAIN_JSON, TB_JSON_OK,      "TB_JSON_OK",      TB_SEV_INFO,  false, "успех" },
-    { TB_DOMAIN_JSON, TB_JSON_PARSE,   "TB_JSON_PARSE",   TB_SEV_ERROR, false, "синтаксическая ошибка JSON" },
-    { TB_DOMAIN_JSON, TB_JSON_SCHEMA,  "TB_JSON_SCHEMA",  TB_SEV_ERROR, false, "JSON не соответствует схеме Envelope" },
-    { TB_DOMAIN_JSON, TB_JSON_BUFFER,  "TB_JSON_BUFFER",  TB_SEV_ERROR, false, "буфер результата слишком мал" },
+    { TB_DOMAIN_JSON, TB_G_JSON,          TB_JSON_OK,      "TB_JSON_OK",      TB_SEV_INFO,  false, "успех" },
+    { TB_DOMAIN_JSON, TB_G_JSON,          TB_JSON_PARSE,   "TB_JSON_PARSE",   TB_SEV_ERROR, false, "синтаксическая ошибка JSON" },
+    { TB_DOMAIN_JSON, TB_G_JSON,          TB_JSON_SCHEMA,  "TB_JSON_SCHEMA",  TB_SEV_ERROR, false, "JSON не соответствует схеме Envelope" },
+    { TB_DOMAIN_JSON, TB_G_JSON,          TB_JSON_BUFFER,  "TB_JSON_BUFFER",  TB_SEV_ERROR, false, "буфер результата слишком мал" },
     /* EVENTS — реестр событий (цепочка модулей, live-таблица, прогон) */
-    { TB_DOMAIN_EVENTS, TB_EV_OK,         "TB_EV_OK",         TB_SEV_INFO,  false, "успех" },
-    { TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE, "TB_EV_BAD_HANDLE", TB_SEV_ERROR, false, "неверный реестр/событие/имя шага" },
-    { TB_DOMAIN_EVENTS, TB_EV_NO_SLOT,    "TB_EV_NO_SLOT",    TB_SEV_ERROR, false, "таблица модулей или live-таблица переполнена" },
-    { TB_DOMAIN_EVENTS, TB_EV_NO_MODULE,  "TB_EV_NO_MODULE",  TB_SEV_ERROR, false, "шаг цепочки не найден" },
-    { TB_DOMAIN_EVENTS, TB_EV_DUPLICATE,  "TB_EV_DUPLICATE",  TB_SEV_ERROR, false, "имя шага уже занято" },
-    { TB_DOMAIN_EVENTS, TB_EV_BAD_STATE,  "TB_EV_BAD_STATE",  TB_SEV_ERROR, false, "операция несовместима с состоянием события" },
-    { TB_DOMAIN_EVENTS, TB_EV_RECURSION,  "TB_EV_RECURSION",  TB_SEV_ERROR, false, "вложенный прогон цепочки запрещён" },
-    { TB_DOMAIN_EVENTS, TB_EV_CONTRACT,   "TB_EV_CONTRACT",   TB_SEV_ERROR, false, "шаг нарушил контракт прогона" },
+    { TB_DOMAIN_EVENTS, TB_G_EVENTS,        TB_EV_OK,         "TB_EV_OK",         TB_SEV_INFO,  false, "успех" },
+    { TB_DOMAIN_EVENTS, TB_G_EVENTS,        TB_EV_BAD_HANDLE, "TB_EV_BAD_HANDLE", TB_SEV_ERROR, false, "неверный реестр/событие/имя шага" },
+    { TB_DOMAIN_EVENTS, TB_G_EVENTS,        TB_EV_NO_SLOT,    "TB_EV_NO_SLOT",    TB_SEV_ERROR, false, "таблица модулей или live-таблица переполнена" },
+    { TB_DOMAIN_EVENTS, TB_G_EVENTS,        TB_EV_NO_MODULE,  "TB_EV_NO_MODULE",  TB_SEV_ERROR, false, "шаг цепочки не найден" },
+    { TB_DOMAIN_EVENTS, TB_G_EVENTS,        TB_EV_DUPLICATE,  "TB_EV_DUPLICATE",  TB_SEV_ERROR, false, "имя шага уже занято" },
+    { TB_DOMAIN_EVENTS, TB_G_EVENTS,        TB_EV_BAD_STATE,  "TB_EV_BAD_STATE",  TB_SEV_ERROR, false, "операция несовместима с состоянием события" },
+    { TB_DOMAIN_EVENTS, TB_G_EVENTS,        TB_EV_RECURSION,  "TB_EV_RECURSION",  TB_SEV_ERROR, false, "вложенный прогон цепочки запрещён" },
+    { TB_DOMAIN_EVENTS, TB_G_EVENTS,        TB_EV_CONTRACT,   "TB_EV_CONTRACT",   TB_SEV_ERROR, false, "шаг нарушил контракт прогона" },
     /* API — стандартизация ответов источников данных */
-    { TB_DOMAIN_API, TB_API_OK,           "TB_API_OK",           TB_SEV_INFO,  false, "успешный ответ источника" },
-    { TB_DOMAIN_API, TB_API_RATE_LIMIT,   "TB_API_RATE_LIMIT",   TB_SEV_WARN,  true,  "HTTP 429: лимит запросов; повтор с учётом Retry-After" },
-    { TB_DOMAIN_API, TB_API_TIMEOUT,      "TB_API_TIMEOUT",      TB_SEV_WARN,  true,  "источник не ответил вовремя" },
-    { TB_DOMAIN_API, TB_API_NETWORK,      "TB_API_NETWORK",      TB_SEV_WARN,  true,  "сетевая ошибка (обрыв, DNS)" },
-    { TB_DOMAIN_API, TB_API_SERVER,       "TB_API_SERVER",       TB_SEV_WARN,  true,  "5xx на стороне источника" },
-    { TB_DOMAIN_API, TB_API_UNAUTHORIZED, "TB_API_UNAUTHORIZED", TB_SEV_ERROR, false, "401/403: ключ отклонён, повторами не исправляется" },
-    { TB_DOMAIN_API, TB_API_NOT_FOUND,    "TB_API_NOT_FOUND",    TB_SEV_WARN,  false, "404: объект неизвестен источнику" },
-    { TB_DOMAIN_API, TB_API_BAD_REQUEST,  "TB_API_BAD_REQUEST",  TB_SEV_ERROR, false, "400/422: некорректный запрос (например, адрес токена)" },
-    { TB_DOMAIN_API, TB_API_PARSE,        "TB_API_PARSE",        TB_SEV_ERROR, false, "ответ не соответствует ожидаемому формату" },
-    { TB_DOMAIN_API, TB_API_PENDING,      "TB_API_PENDING",      TB_SEV_INFO,  true,  "202 Accepted: фоновая задача источника, продолжить опрос" },
-    { TB_DOMAIN_API, TB_API_CIRCUIT_OPEN, "TB_API_CIRCUIT_OPEN", TB_SEV_WARN,  true,  "наш circuit breaker разомкнут для источника" },
-    { TB_DOMAIN_API, TB_API_CANCELED,     "TB_API_CANCELED",     TB_SEV_INFO,  false, "операция отменена" },
-    { TB_DOMAIN_API, TB_API_UNSUPPORTED,  "TB_API_UNSUPPORTED",  TB_SEV_ERROR, false, "источник не поддерживает операцию" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_OK,           "TB_API_OK",           TB_SEV_INFO,  false, "успешный ответ источника" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_RATE_LIMIT,   "TB_API_RATE_LIMIT",   TB_SEV_WARN,  true,  "HTTP 429: лимит запросов; повтор с учётом Retry-After" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_TIMEOUT,      "TB_API_TIMEOUT",      TB_SEV_WARN,  true,  "источник не ответил вовремя" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_NETWORK,      "TB_API_NETWORK",      TB_SEV_WARN,  true,  "сетевая ошибка (обрыв, DNS)" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_SERVER,       "TB_API_SERVER",       TB_SEV_WARN,  true,  "5xx на стороне источника" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_UNAUTHORIZED, "TB_API_UNAUTHORIZED", TB_SEV_ERROR, false, "401/403: ключ отклонён, повторами не исправляется" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_NOT_FOUND,    "TB_API_NOT_FOUND",    TB_SEV_WARN,  false, "404: объект неизвестен источнику" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_BAD_REQUEST,  "TB_API_BAD_REQUEST",  TB_SEV_ERROR, false, "400/422: некорректный запрос (например, адрес токена)" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_PARSE,        "TB_API_PARSE",        TB_SEV_ERROR, false, "ответ не соответствует ожидаемому формату" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_PENDING,      "TB_API_PENDING",      TB_SEV_INFO,  true,  "202 Accepted: фоновая задача источника, продолжить опрос" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_CIRCUIT_OPEN, "TB_API_CIRCUIT_OPEN", TB_SEV_WARN,  true,  "наш circuit breaker разомкнут для источника" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_CANCELED,     "TB_API_CANCELED",     TB_SEV_INFO,  false, "операция отменена" },
+    { TB_DOMAIN_API, TB_G_REGISTRY,      TB_API_UNSUPPORTED,  "TB_API_UNSUPPORTED",  TB_SEV_ERROR, false, "источник не поддерживает операцию" },
     /* USER / Execution Engine — механизм торговли (домен описан в tb/exec/codes.h) */
-    { TB_DOMAIN_USER, TB_EXEC_OK,                     "TB_EXEC_OK",                     TB_SEV_INFO,  false, "успех" },
-    { TB_DOMAIN_USER, TB_EXEC_ZERO_AMOUNT,            "TB_EXEC_ZERO_AMOUNT",            TB_SEV_ERROR, false, "нулевая сумма входа (ZeroAmount)" },
-    { TB_DOMAIN_USER, TB_EXEC_DEADLINE_PAST,          "TB_EXEC_DEADLINE_PAST",          TB_SEV_ERROR, false, "дедлайн ордера истёк или слишком близко (DeadlineInPast)" },
-    { TB_DOMAIN_USER, TB_EXEC_INVALID_PATH,           "TB_EXEC_INVALID_PATH",           TB_SEV_ERROR, false, "маршрут не является путём V3 (InvalidPath)" },
-    { TB_DOMAIN_USER, TB_EXEC_VALUE_MISMATCH,         "TB_EXEC_VALUE_MISMATCH",         TB_SEV_ERROR, false, "дебет/кредит слота не сходится (WrongMsgValue)" },
-    { TB_DOMAIN_USER, TB_EXEC_SETTLE_FAILED,          "TB_EXEC_SETTLE_FAILED",          TB_SEV_ERROR, false, "фиксация расчёта не удалась (EthTransferFailed)" },
-    { TB_DOMAIN_USER, TB_EXEC_NOT_WRAPPED,            "TB_EXEC_NOT_WRAPPED",            TB_SEV_ERROR, false, "нативный актив минуя unwrap — инвариант receive() (NotWeth)" },
-    { TB_DOMAIN_USER, TB_EXEC_SLIPPAGE,               "TB_EXEC_SLIPPAGE",               TB_SEV_WARN,  false, "выход меньше amountOutMinimum (slippage)" },
-    { TB_DOMAIN_USER, TB_EXEC_ROUTE_MISMATCH,         "TB_EXEC_ROUTE_MISMATCH",         TB_SEV_ERROR, false, "маршрут не согласован с ордером" },
-    { TB_DOMAIN_USER, TB_EXEC_INSUFFICIENT_BALANCE,   "TB_EXEC_INSUFFICIENT_BALANCE",   TB_SEV_ERROR, false, "не хватает виртуального баланса на вход" },
-    { TB_DOMAIN_USER, TB_EXEC_INSUFFICIENT_LIQUIDITY, "TB_EXEC_INSUFFICIENT_LIQUIDITY", TB_SEV_WARN,  false, "бэкенд: ликвидности маршрута мало" },
-    { TB_DOMAIN_USER, TB_EXEC_ALLOWLIST,              "TB_EXEC_ALLOWLIST",              TB_SEV_ERROR, false, "токен вне разрешённого списка" },
-    { TB_DOMAIN_USER, TB_EXEC_NOTIONAL_LIMIT,         "TB_EXEC_NOTIONAL_LIMIT",         TB_SEV_ERROR, false, "сумма ордера выше лимита" },
-    { TB_DOMAIN_USER, TB_EXEC_HOPS_LIMIT,             "TB_EXEC_HOPS_LIMIT",             TB_SEV_ERROR, false, "слишком много хопов в маршруте" },
-    { TB_DOMAIN_USER, TB_EXEC_OVERFLOW,               "TB_EXEC_OVERFLOW",               TB_SEV_ERROR, false, "переполнение 256-битной суммы" },
-    { TB_DOMAIN_USER, TB_EXEC_TIMEOUT,                "TB_EXEC_TIMEOUT",                TB_SEV_WARN,  true,  "PENDING не заполнился за лимит опросов" },
-    { TB_DOMAIN_USER, TB_EXEC_BACKEND,                "TB_EXEC_BACKEND",                TB_SEV_WARN,  true,  "ошибка бэкенда исполнения (DEX)" },
-    { TB_DOMAIN_USER, TB_EXEC_CAPACITY,               "TB_EXEC_CAPACITY",               TB_SEV_ERROR, false, "таблица ордеров/кошелька переполнена" },
-    { TB_DOMAIN_USER, TB_EXEC_BAD_DECIMALS,           "TB_EXEC_BAD_DECIMALS",           TB_SEV_ERROR, false, "неверная десятичная строка суммы" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_OK,                     "TB_EXEC_OK",                     TB_SEV_INFO,  false, "успех" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_ZERO_AMOUNT,            "TB_EXEC_ZERO_AMOUNT",            TB_SEV_ERROR, false, "нулевая сумма входа (ZeroAmount)" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_DEADLINE_PAST,          "TB_EXEC_DEADLINE_PAST",          TB_SEV_ERROR, false, "дедлайн ордера истёк или слишком близко (DeadlineInPast)" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_INVALID_PATH,           "TB_EXEC_INVALID_PATH",           TB_SEV_ERROR, false, "маршрут не является путём V3 (InvalidPath)" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_VALUE_MISMATCH,         "TB_EXEC_VALUE_MISMATCH",         TB_SEV_ERROR, false, "дебет/кредит слота не сходится (WrongMsgValue)" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_SETTLE_FAILED,          "TB_EXEC_SETTLE_FAILED",          TB_SEV_ERROR, false, "фиксация расчёта не удалась (EthTransferFailed)" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_NOT_WRAPPED,            "TB_EXEC_NOT_WRAPPED",            TB_SEV_ERROR, false, "нативный актив минуя unwrap — инвариант receive() (NotWeth)" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_SLIPPAGE,               "TB_EXEC_SLIPPAGE",               TB_SEV_WARN,  false, "выход меньше amountOutMinimum (slippage)" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_ROUTE_MISMATCH,         "TB_EXEC_ROUTE_MISMATCH",         TB_SEV_ERROR, false, "маршрут не согласован с ордером" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_INSUFFICIENT_BALANCE,   "TB_EXEC_INSUFFICIENT_BALANCE",   TB_SEV_ERROR, false, "не хватает виртуального баланса на вход" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_INSUFFICIENT_LIQUIDITY, "TB_EXEC_INSUFFICIENT_LIQUIDITY", TB_SEV_WARN,  false, "бэкенд: ликвидности маршрута мало" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_ALLOWLIST,              "TB_EXEC_ALLOWLIST",              TB_SEV_ERROR, false, "токен вне разрешённого списка" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_NOTIONAL_LIMIT,         "TB_EXEC_NOTIONAL_LIMIT",         TB_SEV_ERROR, false, "сумма ордера выше лимита" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_HOPS_LIMIT,             "TB_EXEC_HOPS_LIMIT",             TB_SEV_ERROR, false, "слишком много хопов в маршруте" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_OVERFLOW,               "TB_EXEC_OVERFLOW",               TB_SEV_ERROR, false, "переполнение 256-битной суммы" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_TIMEOUT,                "TB_EXEC_TIMEOUT",                TB_SEV_WARN,  true,  "PENDING не заполнился за лимит опросов" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_BACKEND,                "TB_EXEC_BACKEND",                TB_SEV_WARN,  true,  "ошибка бэкенда исполнения (DEX)" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_CAPACITY,               "TB_EXEC_CAPACITY",               TB_SEV_ERROR, false, "таблица ордеров/кошелька переполнена" },
+    { TB_DOMAIN_USER, TB_G_EXEC,          TB_EXEC_BAD_DECIMALS,           "TB_EXEC_BAD_DECIMALS",           TB_SEV_ERROR, false, "неверная десятичная строка суммы" },
 };
 
 /* ---- Шаблоны отображения ответов источников ---- */
@@ -308,4 +309,27 @@ const tb_provider_map_t *tb_registry_map_at(size_t index)
     index -= builtin_n;
     if (index < g_custom_count) return &g_custom_maps[index];
     return NULL;
+}
+
+/* ---- Самотест связности таблицы ---- */
+int tb_registry_ownership_check(tb_error_t *err)
+{
+    size_t n = tb_registry_meta_count();
+    for (size_t i = 0; i < n; i++) {
+        const tb_error_meta_t *m = tb_registry_meta_at(i);
+        if (m->owner == TB_G_UNASSIGNED) {
+            TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                         "код %s без владельца", m->name);
+            return -1;
+        }
+        for (size_t j = i + 1; j < n; j++) {
+            const tb_error_meta_t *o = tb_registry_meta_at(j);
+            if (m->domain == o->domain && m->code == o->code) {
+                TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                             "дубль (%s, %s)", m->name, o->name);
+                return -1;
+            }
+        }
+    }
+    return 0;
 }

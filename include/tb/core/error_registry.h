@@ -23,6 +23,8 @@ extern "C" {
 /* Метаданные унифицированного кода ошибки. */
 typedef struct {
     uint8_t      domain;            /* tb_domain_t */
+    uint16_t     owner;             /* tb_group_id_t: группа-владелец кода
+                                     * (канонический ответственный) */
     uint32_t     code;              /* код внутри домена */
     const char  *name;              /* каноническое имя, напр. "TB_API_RATE_LIMIT" */
     uint8_t      default_severity;  /* tb_severity_t */
@@ -44,6 +46,10 @@ typedef struct {
 
 /* ---- Метаданные кодов ---- */
 const tb_error_meta_t *tb_registry_meta(uint8_t domain, uint32_t code);
+
+/* Проверка целостности встроенной таблицы: у каждого кода есть владелец
+ * и (domain, code) уникальна. 0 — таблица цела. Самотест связности. */
+int tb_registry_ownership_check(tb_error_t *err);
 size_t tb_registry_meta_count(void);
 const tb_error_meta_t *tb_registry_meta_at(size_t index);
 

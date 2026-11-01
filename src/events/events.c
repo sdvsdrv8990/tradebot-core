@@ -1,3 +1,4 @@
+#define TB_CURRENT_GROUP TB_G_EVENTS /* зона ответственности файла */
 /* ==========================================================================
  *  tb/events/events.c — реализация реестра событий.
  *
@@ -170,7 +171,7 @@ tb_evreg_t *tb_evreg_create(size_t max_live, tb_error_t *err)
 
     tb_evreg_t *r = calloc(1, sizeof(*r));
     if (!r) {
-        tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY,
                      "tb_evreg: нет памяти на реестр");
         return NULL;
     }
@@ -180,7 +181,7 @@ tb_evreg_t *tb_evreg_create(size_t max_live, tb_error_t *err)
         free(r->live);
         free(r->free_stack);
         free(r);
-        tb_error_set(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY,
                      "tb_evreg: нет памяти на live-таблицу (%zu)", max_live);
         return NULL;
     }
@@ -244,12 +245,12 @@ static int mod_insert_at(tb_evreg_t *r, size_t pos, const char *name,
                          tb_ev_handler_t fn, void *user, tb_error_t *err)
 {
     if (tb_evreg_mod_index(r, name) >= 0) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_DUPLICATE, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_DUPLICATE,
                      "шаг '%s' уже в цепочке", name);
         return -1;
     }
     if (r->nmods >= TB_EVENTS_MAX_MODULES) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_NO_SLOT, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_NO_SLOT,
                      "цепочка полна (%d шагов)", TB_EVENTS_MAX_MODULES);
         return -1;
     }
@@ -277,7 +278,7 @@ int tb_evreg_add(tb_evreg_t *r, const char *name, tb_ev_handler_t fn,
                  void *user, tb_error_t *err)
 {
     if (!r || !name || !fn) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE,
                      "tb_evreg_add: пустой реестр/имя/обработчик");
         return -1;
     }
@@ -288,13 +289,13 @@ int tb_evreg_add_before(tb_evreg_t *r, const char *anchor, const char *name,
                         tb_ev_handler_t fn, void *user, tb_error_t *err)
 {
     if (!r || !name || !fn || !anchor) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE,
                      "tb_evreg_add_before: пустой реестр/имя/обработчик/якорь");
         return -1;
     }
     int at = tb_evreg_mod_index(r, anchor);
     if (at < 0) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_NO_MODULE, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_NO_MODULE,
                      "шаг-якорь '%s' не найден", anchor);
         return -1;
     }
@@ -305,7 +306,7 @@ bool tb_evreg_remove(tb_evreg_t *r, const char *name, tb_error_t *err)
 {
     int idx = tb_evreg_mod_index(r, name);
     if (idx < 0) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_NO_MODULE, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_NO_MODULE,
                      "шаг '%s' не найден", name ? name : "?");
         return false;
     }
@@ -353,14 +354,14 @@ tb_event_t *tb_event_create(tb_evreg_t *r, uint16_t kind, uint8_t flags,
                             tb_error_t *err)
 {
     if (!r) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE,
                      "tb_event_create: реестр пуст");
         return NULL;
     }
     if (r->free_top == 0) {
         size_t victim = oldest_terminal_slot(r);
         if (victim == r->live_cap) {
-            tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_NO_SLOT, TB_LOC,
+            TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_NO_SLOT,
                          "live-таблица полна живыми событиями (%zu)",
                          r->live_cap);
             return NULL;
@@ -480,7 +481,7 @@ static int evreg_walk(tb_evreg_t *r, tb_event_t *ev, size_t start, tb_error_t *e
 
         case TB_EV_ACT_FAIL:
             if (!tb_error_is_set(&ev->err)) {
-                tb_error_set(&ev->err, TB_DOMAIN_EVENTS, TB_EV_CONTRACT, TB_LOC,
+                TB_ERROR_SET(&ev->err, TB_DOMAIN_EVENTS, TB_EV_CONTRACT,
                              "шаг '%s' вернул FAIL без заполненной ошибки события",
                              modname);
                 TB_LOG_WARN("evreg: %s", ev->err.message);
@@ -508,18 +509,18 @@ int tb_evreg_dispatch(tb_evreg_t *r, tb_event_t *ev, tb_error_t *err)
 {
     size_t idx;
     if (!slot_of(r, ev, &idx)) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE,
                      "tb_evreg_dispatch: событие не принадлежит реестру");
         return -1;
     }
     if (r->dispatching) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_RECURSION, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_RECURSION,
                      "вложенный прогон цепочки (событие #%llu)",
                      (unsigned long long)ev->id);
         return -1;
     }
     if (ev->state != TB_EV_QUEUED) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_BAD_STATE, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_BAD_STATE,
                      "dispatch возможен только из QUEUED (сейчас %s)",
                      tb_ev_state_name((tb_ev_state_t)ev->state));
         return -1;
@@ -532,18 +533,18 @@ int tb_evreg_continue(tb_evreg_t *r, tb_event_t *ev, tb_error_t *err)
 {
     size_t idx;
     if (!slot_of(r, ev, &idx)) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_BAD_HANDLE,
                      "tb_evreg_continue: событие не принадлежит реестру");
         return -1;
     }
     if (r->dispatching) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_RECURSION, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_RECURSION,
                      "вложенный прогон цепочки (событие #%llu)",
                      (unsigned long long)ev->id);
         return -1;
     }
     if (ev->state != TB_EV_BLOCKED) {
-        tb_error_set(err, TB_DOMAIN_EVENTS, TB_EV_BAD_STATE, TB_LOC,
+        TB_ERROR_SET(err, TB_DOMAIN_EVENTS, TB_EV_BAD_STATE,
                      "continue возможен только из BLOCKED (сейчас %s)",
                      tb_ev_state_name((tb_ev_state_t)ev->state));
         return -1;
