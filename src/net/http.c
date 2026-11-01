@@ -645,6 +645,9 @@ static int net_request(tb_http_t *h, const tb_http_req_t *req,
     mbedtls_ssl_config conf;
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
+    /* на уровне функции: ssl.p_bio = &net живёт до конца чтения ответа,
+     * объявление внутри if (is_tls) оставляло висячий указатель на стек */
+    mbedtls_net_context net = { .fd = -1 };
     bool tls_up = false;
 
     if (is_tls) {
@@ -674,7 +677,7 @@ static int net_request(tb_http_t *h, const tb_http_req_t *req,
             TB_ERROR_SET(err, TB_DOMAIN_NET, TB_NET_TLS, "setup TLS");
             goto out;
         }
-        mbedtls_net_context net = { .fd = fd };
+        net.fd = fd;
         mbedtls_ssl_set_bio(&ssl, &net, mbedtls_net_send, mbedtls_net_recv,
                             NULL);
 

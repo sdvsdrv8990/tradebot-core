@@ -65,6 +65,46 @@ cmd_stop() {
     rm -f "$PIDFILE"
 }
 
+# Локальные логотипы для морды: качаем раз (потом только новые пулы/биржи).
+# Сбой сети не фатален: страница покажет буквенные бейджи.
+ensure_logos() {
+    local cfg="$1"
+    python3 - "$cfg" <<'PYEOF2' || true
+import json, subprocess, os, sys
+cfg = json.load(open(sys.argv[1]))
+def slug(n):
+    n = n.lower()
+    for suf in ("-v3", "-v2"):
+        if n.endswith(suf):
+            n = n[: -len(suf)]
+    return n
+slugs = {slug(v["name"]) for v in cfg.get("rpc", []) if v.get("name")}
+slugs |= {slug(p["dex"]) for p in cfg.get("pools", []) if p.get("dex")}
+# URL требует checksummed-регистр, файл храним в нижнем (так просит морда)
+toks = [p["token"] for p in cfg.get("pools", []) if p.get("token")]
+if cfg.get("weth"):
+    toks.append(cfg["weth"])
+def get(url, path):
+    if os.path.exists(path):
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    r = subprocess.run(["curl", "-fsSL", "-m", "20", "-o", path, url],
+                       capture_output=True)
+    if r.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+for s in sorted(slugs):
+    get(f"https://icons.llamao.fi/icons/protocols/{s}?w=48&h=48",
+        f"logos/dex/{s}.webp")
+for a in sorted(set(toks)):
+    get("https://raw.githubusercontent.com/trustwallet/assets/master/"
+        f"blockchains/ethereum/assets/{a}/logo.png",
+        f"logos/token/{a.lower()}.png")
+PYEOF2
+}
+
 ensure_built() {
     # Полный ./setup.sh all (зависимости+сборка+тесты), если бинарника нет
     # или исходники новее. Идемпотентно, кэш не тянет.
@@ -90,6 +130,7 @@ cmd_start() {
     local cfg="${TB_CONFIG:-$CFG_DEFAULT}"
     local led="${TB_LEDGER:-./arb_demo.jsonl}"
     local port="${TB_WEB_PORT:-$WEB_DEFAULT_PORT}"
+    ensure_logos "$cfg"
 
     local args=(--config "$cfg" --ledger "$led" --web-port "$port")
     case "${TB_MODE:-}" in

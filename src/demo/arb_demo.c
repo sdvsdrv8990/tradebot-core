@@ -306,17 +306,24 @@ static const char DASH_JS[] =
 static const char VENUES_JS[] =
     "async function tick(){try{"
     "const m=await (await fetch('/api/market')).json();"
+    "const key=JSON.stringify(m).replace(/\"(ts_ms|uptime_ms)\":\d+/g,'');"
+    "if(!changed('venues',key))return;"
     "document.getElementById('mode').textContent='биржи и цены · '+"
     "((m.venues||[]).length)+' бирж · проба '+eth(m.probe_wei)+' ETH';"
     "let h='<h2>Пары по выгодности (сверху лучшие)</h2>"
     "<table><thead><tr><th>токен</th><th>покупка</th><th>продажа</th>"
     "<th>спред</th><th>профит/пробу ETH</th></tr></thead><tbody>';"
     "h+=(m.pairs||[]).map(p=>'<tr><td>'+tokLogo(p.token)"
-    "+'<a class=\"dex\" href=\"https://etherscan.io/token/'+p.token"
-    "+'\" target=\"_blank\" rel=\"noreferrer\">'+short(p.token)+'</a></td><td>'"
+    "+'<a class=\"dex\" title=\"'+p.token+'\" "
+    "href=\"https://etherscan.io/token/'+p.token"
+    "+'\" target=\"_blank\" rel=\"noreferrer\">'+esc(p.symbol||"
+    "short(p.token))+'</a></td><td>'"
     "+dexCell(p.buy)+'</td><td>'+dexCell(p.sell)+'</td>'"
     "+'<td style=\"color:'+(p.spread_bp>0?'#5dd39e':'#7b8494')+'\">'"
     "+bp(p.spread_bp)+'</td><td>'+eth(p.profit_wei)+'</td></tr>').join('');"
+    "if(!(m.pairs||[]).length)"
+    "h+='<tr><td colspan=\"5\" class=\"mut\">нет пар с положительным "
+    "спредом</td></tr>';"
     "h+='</tbody></table>';"
     "h+='<h2>Пулы под наблюдением</h2>"
     "<table><thead><tr><th>биржа</th><th>пул</th><th>fee</th>"
@@ -365,6 +372,26 @@ static const tb_web_page_t WEB_PAGES[] = {
     {"venues", "/venues", "Биржи и цены", VENUES_JS},
     {"trades", "/trades", "Сделки", TRADES_JS},
 };
+
+/* Символ ходовых токенов mainnet: hex-адреса в таблицах не читаемы. */
+static const char *token_symbol(const tb_addr_t *a)
+{
+    static const struct { const char *hex, *sym; } map[] = {
+        {"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", "WETH"},
+        {"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC"},
+        {"0xdac17f958d2ee523a2206206994597c13d831ec7", "USDT"},
+        {"0x6b175474e89094c44da98b954eedeac495271d0f", "DAI"},
+        {"0x2260fac5e5542a773aa44fbcfedf7c193bc2c599", "WBTC"},
+        {"0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce", "SHIB"},
+        {"0x6982508145454ce325ddbe47a25d4ec3d2311933", "PEPE"},
+    };
+    char hex[43];
+    tb_addr_to_hex(a, hex, sizeof(hex));
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+        if (strcasecmp(hex, map[i].hex) == 0)
+            return map[i].sym;
+    return NULL; /* неизвестен — покажем короткий адрес */
+}
 
 /* Снимок рынка для страницы «Биржи и цены»: последние котировки пулов
  * + спреды пар (та же арифметика б.п., что в фильтрах; сортировка по
@@ -490,12 +517,14 @@ static void web_build_market(app_t *d, char *out, size_t cap)
             continue;
         char tok_s[43], prof_s[80];
         tb_addr_to_hex(&bpl->token, tok_s, sizeof(tok_s));
+        const char *sym = token_symbol(&bpl->token);
         tb_u256_t pw = tb_u256_from_u64(pairs[k].prof);
         tb_u256_to_dec(&pw, prof_s, sizeof(prof_s));
-        MK_APPEND("%s{\"token\":\"%s\",\"buy\":\"%s %u.%04u%%\","
+        MK_APPEND("%s{\"token\":\"%s\",\"symbol\":\"%s\","
+                  "\"buy\":\"%s %u.%04u%%\","
                   "\"sell\":\"%s %u.%04u%%\",\"spread_bp\":%u,"
                   "\"profit_wei\":\"%s\"}",
-                  k ? "," : "", tok_s, bs->dex,
+                  k ? "," : "", tok_s, sym ? sym : "", bs->dex,
                   bpl->fee / 10000, bpl->fee % 10000, ss->dex,
                   spl->fee / 10000, spl->fee % 10000, pairs[k].bp, prof_s);
     }

@@ -42,6 +42,7 @@ typedef struct tb_webui {
     tb_web_page_t pages[TB_WEBUI_PAGES_MAX];
     uint32_t     pages_n;
     char         ledger_path[512];
+    char         logos_dir[380]; /* ./logos — локальные лого /logo/... */
 } tb_webui_t;
 
 /* ---- HTML-оболочка (тема + навигация + автообновление) ---- */
@@ -92,9 +93,9 @@ static const char SHELL_JS[] =
     "+s.slice(-4):s};"
     "const bp=n=>((n>0?'+':'')+ (Number(n)/100).toFixed(2)+'%');"
     "const big=s=>{try{return BigInt(s||0)}catch(e){return 0n}};"
-    "const eth=w=>{const v=big(w),s=v<0n?-v:v,d=(v<0n?'-':'')+"
-    "(s/10n**10n).toString().padStart(11,'0');"
-    "return d.slice(0,-8)+'.'+d.slice(-8)};"
+    "const eth=w=>{const v=big(w),s=v<0n?-v:v,f=s/10n**10n;"
+    "return (v<0n?'-':'')+(f/10n**8n).toString()+'.'+"
+    "(f%10n**8n).toString().padStart(8,'0')};"
     "const DEXU={uniswap:'https://app.uniswap.org',"
     "pancakeswap:'https://pancakeswap.finance',"
     "sushiswap:'https://www.sushi.com/swap'};"
@@ -102,14 +103,16 @@ static const char SHELL_JS[] =
     "const logoErr=i=>{i.outerHTML='<span class=\"badge\">'+"
     "esc(i.dataset.f||'?').slice(0,1).toUpperCase()+'</span>'};"
     "const dexLogo=n=>'<img class=\"logo\" loading=\"lazy\" data-f=\"'+"
-    "esc(n)+'\" onerror=\"logoErr(this)\" src=\"https://icons.llamao.fi/"
-    "icons/protocols/'+slug(n).replace(/-v[23]$/,'')+'?w=48&h=48\" alt=\"\">';"
+    "esc(n)+'\" onerror=\"logoErr(this)\" src=\"/logo/dex/'+slug(n)+"
+    "'.webp\" alt=\"\">';"
     "const tokLogo=a=>'<img class=\"logo\" loading=\"lazy\" data-f=\"'+"
-    "esc(a)+'\" onerror=\"logoErr(this)\" src=\"https://raw."
-    "githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/"
-    "assets/'+String(a||'')+'/logo.png\" alt=\"\">';"
+    "esc(a)+'\" onerror=\"logoErr(this)\" src=\"/logo/token/'+"
+    "String(a||'').toLowerCase()+'.png\" alt=\"\">';"
     "const dexCell=x=>{const v=String(x||'').split(' ')[0];"
-    "const u=DEXU[slug(v)];const inner=dexLogo(v)+esc(x);"
+    "const fee=String(x||'').split(' ').slice(1).join(' ');"
+    "const u=DEXU[slug(v)];"
+    "const inner=dexLogo(v)+'<span title=\"'+esc(v)+'\">'+esc(fee||v)"
+    "+'</span>';"
     "return u?('<a class=\"dex\" href=\"'+u+'\" target=\"_blank\" "
     "rel=\"noreferrer\">'+inner+'</a>'):inner};";
 
@@ -132,7 +135,10 @@ static size_t build_page(tb_webui_t *w, char *out, size_t cap, uint32_t pi)
     pthread_mutex_unlock(&w->lock);
 
     o += (size_t)snprintf(out + o, cap - o,
-        "document.getElementById('nav').innerHTML=NAV.map((n,i)=>"
+        "const __last={};/* анти-мерцание: те же данные — не перерисовываем */"
+    "const changed=(k,s)=>{if(__last[k]===s)return false;__last[k]=s;"
+    "return true};"
+    "document.getElementById('nav').innerHTML=NAV.map((n,i)=>"
         "'<a href=\"'+n.p+'\" class=\"'+(i===ACT?'on':'')+'\">'+n.t+'</a>')"
         ".join('');");
     o += (size_t)snprintf(out + o, cap - o, "%s", js);
@@ -243,6 +249,55 @@ static void respond_ledger(tb_webui_t *w, int c, const char *prefix)
     respond(c, "application/json", out, strlen(out));
 }
 
+/* Локальные логотипы: /logo/<kind>/<name>, kind = dex | token, файл из
+ * каталога logos_dir (по умолчанию ./logos, задаётся перед start).
+ * Имя строго [a-z0-9.-]: обход каталогов исключён. Нет файла — 404,
+ * клиент рисует буквенный бейдж. */
+static void respond_logo(tb_webui_t *w, int c, const char *kind,
+                         const char *name)
+{
+    if (!kind || !name)
+        return (void)respond_404(c);
+    if (strcmp(kind, "dex") != 0 && strcmp(kind, "token") != 0)
+        return (void)respond_404(c);
+    for (const char *p = name; *p; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9')
+              || *p == '.' || *p == '-'))
+            return (void)respond_404(c);
+    if (strstr(name, ".."))
+        return (void)respond_404(c);
+
+    char file[600];
+    snprintf(file, sizeof(file), "%s/%s/%s", w->logos_dir, kind, name);
+    FILE *f = fopen(file, "rb");
+    if (!f)
+        return (void)respond_404(c);
+    static char buf[64 * 1024];
+    size_t n = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    if (n == 0)
+        return (void)respond_404(c);
+    const char *ct = "image/png";
+    const char *ext = strrchr(name, '.');
+    if (ext) {
+        if (strcmp(ext, ".webp") == 0)
+            ct = "image/webp";
+        else if (strcmp(ext, ".svg") == 0)
+            ct = "image/svg+xml";
+        else if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0)
+            ct = "image/jpeg";
+    }
+    /* кэш браузера: логотипы не меняются — не мигают при перерисовках */
+    static const char head[] =
+        "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+        "Cache-Control: max-age=86400\r\nConnection: close\r\n\r\n";
+    char h[192];
+    int hn = snprintf(h, sizeof(h), head, ct, n);
+    if (hn > 0)
+        send_all(c, h, (size_t)hn);
+    send_all(c, buf, n);
+}
+
 static void serve_client(tb_webui_t *w, int c)
 {
     char req[4096] = {0};
@@ -262,6 +317,21 @@ static void serve_client(tb_webui_t *w, int c)
     char path[64] = {0};
     for (size_t i = 0; i < sizeof(path) - 1 && req[4 + i] != ' '; i++)
         path[i] = req[4 + i];
+
+    if (strncmp(path, "/logo/", 6) == 0) {
+        char kind[16] = {0}, name[64] = {0};
+        const char *rest = path + 6;
+        const char *slash = strchr(rest, '/');
+        if (slash && slash - rest < (ptrdiff_t)sizeof(kind)
+            && strlen(slash + 1) < sizeof(name)) {
+            memcpy(kind, rest, (size_t)(slash - rest));
+            snprintf(name, sizeof(name), "%s", slash + 1);
+            respond_logo(w, c, kind, name);
+            return;
+        }
+        respond_404(c);
+        return;
+    }
 
     if (strncmp(path, "/api/", 5) == 0) {
         const char *name = path + 5;
@@ -330,6 +400,7 @@ int tb_webui_start(tb_webui_t **out, uint16_t want_port,
     if (!w)
         TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "webui");
     snprintf(w->ledger_path, sizeof(w->ledger_path), "%s", ledger_path);
+    snprintf(w->logos_dir, sizeof(w->logos_dir), "%s", "./logos");
     pthread_mutex_init(&w->lock, NULL);
 
     int bound = -1;
