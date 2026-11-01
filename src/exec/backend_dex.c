@@ -28,8 +28,13 @@
 
 typedef struct dex_session {
     uint64_t   tx_id;      /* != 0 — занято */
-    tb_u256_t  amount_out; /* цена submit-котировки: поллинг цену не меняет */
+    tb_u256_t  amount_out; /* shadow: цена котировки; live: дельта баланса */
     uint64_t   fill_at_ms;
+    /* live (v0.4): хеш отправленной транзакции + контекст дельты */
+    bool       live;
+    uint8_t    tx_hash[32];
+    tb_addr_t  out_token;  /* последний токен маршрута */
+    tb_u256_t  balance_before;
 } dex_session_t;
 
 typedef struct dex_ctx {
@@ -423,6 +428,57 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
         return -1;
     }
 
+    if (c->cfg.live) {
+        /* ---- живое исполнение из Safe (v0.4) ---- */
+        dex_session_t *s = NULL;
+        for (size_t i = 0; i < TB_DEX_MAX_SESSIONS; i++)
+            if (c->txs[i].tx_id == 0) {
+                s = &c->txs[i];
+                break;
+            }
+        if (!s)
+            TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_CAPACITY,
+                          "dex: таблица сессий полна");
+
+        tb_addr_t out_tok = tb_route_last(route);
+        tb_u256_t before;
+        tb_error_t berr = TB_ERROR_INIT;
+        if (tb_safe_balance_of(c->http, &c->cfg.safe, &out_tok,
+                               &c->cfg.safe.safe, &before, &berr) != 0) {
+            *err = berr;
+            return -1;
+        }
+
+        uint8_t calldata[2048];
+        size_t calldata_len = tb_safe_build_exact_input(
+            calldata, sizeof(calldata), route, &c->cfg.safe.safe,
+            amount_in, min_out ? min_out : &out);
+        if (!calldata_len)
+            TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW,
+                          "dex: exactInput calldata");
+
+        uint8_t tx_hash[32];
+        tb_error_t serr = TB_ERROR_INIT;
+        if (tb_safe_send_exec(c->http, &c->cfg.safe, &c->cfg.safe.router, 0,
+                              calldata, calldata_len, tx_hash,
+                              &serr) != 0) {
+            *err = serr;
+            return -1;
+        }
+
+        memset(s, 0, sizeof(*s));
+        s->tx_id = ++c->next_tx;
+        s->live = true;
+        memcpy(s->tx_hash, tx_hash, 32);
+        s->out_token = out_tok;
+        s->balance_before = before;
+        s->amount_out = out; /* оценка; истина придёт дельтой в poll */
+
+        *tx_id = s->tx_id;
+        *amount_out = out;
+        return 1; /* SUBMITTED: ждём майнинг */
+    }
+
     dex_session_t *s = NULL;
     for (size_t i = 0; i < TB_DEX_MAX_SESSIONS; i++)
         if (c->txs[i].tx_id == 0) {
@@ -461,6 +517,39 @@ static int dex_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
         TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                       "dex: неизвестная сессия %llu",
                       (unsigned long long)tx_id);
+
+    if (s->live) {
+        bool is_null = false;
+        int status = 0;
+        tb_error_t rerr = TB_ERROR_INIT;
+        if (tb_safe_receipt(c->http, &c->cfg.safe, s->tx_hash, &is_null,
+                            &status, &rerr) != 0) {
+            *err = rerr;
+            return -1;
+        }
+        if (is_null)
+            return 1; /* ещё в мемпуле/блоке */
+
+        if (status != 1) {
+            s->tx_id = 0;
+            TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                          "dex: транзакция Safe ревертнулась (status=0)");
+        }
+
+        tb_u256_t after;
+        tb_error_t berr = TB_ERROR_INIT;
+        if (tb_safe_balance_of(c->http, &c->cfg.safe, &s->out_token,
+                               &c->cfg.safe.safe, &after, &berr) != 0) {
+            *err = berr;
+            return -1;
+        }
+        if (!tb_u256_sub(amount_out, &after, &s->balance_before))
+            memset(amount_out, 0, sizeof(*amount_out)); /* стало меньше */
+
+        s->tx_id = 0;
+        c->stats.fills++;
+        return 0; /* заполнено: фактический выход с цепи */
+    }
 
     if (now_ms < s->fill_at_ms)
         return 1; /* ещё в работе */

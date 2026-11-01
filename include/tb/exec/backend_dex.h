@@ -28,6 +28,7 @@
 #include "tb/exec/backend.h"
 #include "tb/exec/route.h"
 #include "tb/net/http.h"
+#include "tb/exec/safe_exec.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,6 +61,12 @@ typedef struct tb_exec_dex_cfg {
     uint32_t            fill_delay_min_ms;  /* 0 -> 300 */
     uint32_t            fill_delay_max_ms;  /* 0 -> 900 */
     uint64_t            seed;               /* 0 -> tb_rdtsc() */
+
+    /* live: исполнение из Safe через execTransaction (v0.4). Котировки
+     * те же (QuoterV2), submit/poll — настоящие транзакции; фактический
+     * выход = дельта balanceOf(Safe). false -> shadow (по умолчанию). */
+    bool                live;
+    tb_safe_cfg_t       safe;
 } tb_exec_dex_cfg_t;
 
 /* Инициализация заимствованного tb_exec_backend_t (не heap: структура

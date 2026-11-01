@@ -250,6 +250,29 @@ int tb_tx1559_sign(const tb_key_t *k, const tb_tx1559_t *tx,
     return 0;
 }
 
+int tb_ecdsa_sign(const tb_key_t *k, const uint8_t hash[32], uint8_t r[32],
+                  uint8_t s[32], int *y_parity, tb_error_t *err)
+{
+    if (!k || !k->ok || !hash || !r || !s || !y_parity)
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                      "ecdsa: аргументы");
+
+    secp256k1_ecdsa_recoverable_signature rsig;
+    if (!secp256k1_ecdsa_sign_recoverable(sign_ctx(), &rsig, hash,
+                                           k->secret, NULL, NULL))
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_UNSUPPORTED,
+                      "ecdsa: secp256k1 отказ");
+
+    uint8_t sig[65];
+    int recid = 0;
+    secp256k1_ecdsa_recoverable_signature_serialize_compact(
+        sign_ctx(), sig, &recid, &rsig);
+    memcpy(r, sig, 32);
+    memcpy(s, sig + 32, 32);
+    *y_parity = recid;
+    return 0;
+}
+
 int tb_sig_recover_sender(const uint8_t msg_hash[32], const uint8_t r[32],
                           const uint8_t s[32], int y_parity,
                           tb_addr_t *out, tb_error_t *err)

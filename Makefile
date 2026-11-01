@@ -87,7 +87,7 @@ CORE_SRC := \
 RUNTIME_SRC := src/json/envelope.cpp src/json/config.cpp
 NET_SRC     := src/net/http.c
 SIGN_SRC   := src/sign/tx.c
-DEX_SRC     := src/exec/backend_dex.c
+DEX_SRC     := src/exec/backend_dex.c src/exec/safe_exec.c
 USER_SRC    := src/user/filters.c src/user/decision.c src/user/arb.c
 
 CORE_OBJ   := $(addprefix $(BUILD)/,$(CORE_SRC:.c=.o))
@@ -115,7 +115,7 @@ TEST_C_BINS  := test_error test_registry test_arch test_pqueue test_timer \
         test_backoff test_runtime test_events test_ledger test_loop \
         test_u256 test_route test_wallet test_net test_backend_dex \
         test_filters test_decision test_config test_ids test_details \
-        test_ctx test_keccak test_sign
+        test_ctx test_keccak test_sign test_safe_exec
 TEST_CXX_BINS:= test_envelope test_exec
 TEST_BINS    := $(TEST_C_BINS) $(TEST_CXX_BINS)
 
@@ -165,6 +165,9 @@ $(BUILD)/libtb_dex.a: $(DEX_OBJ)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
+# dex зависит от tb_sign (safe_exec) и secp256k1
+LDFLAGS_SIGN := $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a
+
 $(BUILD)/libtb_user.a: $(USER_OBJ)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
@@ -190,6 +193,10 @@ $(BUILD)/tests/test_exec: tests/test_exec.cpp $(BUILD)/libtb_core.a $(BUILD)/lib
 	$(CXX) $(CXXFLAGS) -o $@ $< $(BUILD)/libtb_runtime.a $(BUILD)/libtb_core.a $(LDFLAGS)
 
 # тесты, зависящие от tb_net/tb_dex (+mbedTLS)
+$(BUILD)/tests/test_safe_exec: tests/test_safe_exec.c $(BUILD)/libtb_dex.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libmbed_tls.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Ithird_party/secp256k1/include -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_SIGN) $(LDFLAGS_NET) $(LDFLAGS)
+
 $(BUILD)/tests/test_sign: tests/test_sign.c $(BUILD)/libtb_core.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Ithird_party/secp256k1/include -o $@ $< $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libtb_core.a $(LDFLAGS)

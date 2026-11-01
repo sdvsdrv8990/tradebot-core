@@ -68,6 +68,10 @@ int tb_tx1559_sign(const tb_key_t *k, const tb_tx1559_t *tx,
                    char *raw_hex, size_t cap, uint8_t tx_hash[32],
                    uint8_t sig65[65], tb_error_t *err);
 
+/* Голый ECDSA над хешем (EIP-712/личные сообщения): r, s, y-parity. */
+int tb_ecdsa_sign(const tb_key_t *k, const uint8_t hash[32], uint8_t r[32],
+                  uint8_t s[32], int *y_parity, tb_error_t *err);
+
 /* Восстановить адрес отправителя из подписи (самопроверка/тесты). */
 int tb_sig_recover_sender(const uint8_t msg_hash[32], const uint8_t r[32],
                           const uint8_t s[32], int y_parity,

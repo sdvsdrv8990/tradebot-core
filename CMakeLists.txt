@@ -119,9 +119,10 @@ target_link_libraries(tb_net PUBLIC tb_core mbedtls mbedx509 mbedcrypto)
 # ---------------------------------------------------------------------------
 add_library(tb_dex STATIC
   src/exec/backend_dex.c
+  src/exec/safe_exec.c
 )
 target_include_directories(tb_dex PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(tb_dex PUBLIC tb_net tb_core)
+target_link_libraries(tb_dex PUBLIC tb_net tb_core tb_sign)
 
 # ---------------------------------------------------------------------------
 #  tb_user — USER-домен: фильтры 1–4, Decision Engine, рантайм арбитража
@@ -201,6 +202,7 @@ set(TB_C_TESTS
   test_ctx
   test_keccak
   test_sign
+  test_safe_exec
 )
 foreach(name IN LISTS TB_C_TESTS)
   add_executable(${name} tests/${name}.c)
@@ -211,6 +213,7 @@ endforeach()
 target_link_libraries(test_net PRIVATE tb_net)
 target_link_libraries(test_backend_dex PRIVATE tb_dex)
 target_link_libraries(test_details PRIVATE tb_dex tb_user)
+target_link_libraries(test_safe_exec PRIVATE tb_dex)
 target_link_libraries(test_sign PRIVATE tb_sign)
 target_link_libraries(test_filters PRIVATE tb_user)
 target_link_libraries(test_decision PRIVATE tb_user)
