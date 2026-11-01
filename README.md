@@ -56,57 +56,16 @@ make markers
 ./build/arb_demo --replay --duration 8000 --ledger ./arb_demo.jsonl
 ```
 
-Аргументы всех трёх демо: `--duration МС`, `--ledger ПУТЬ`, `--seed N`
-(по умолчанию — энтропия из RDTSC; длительность по умолчанию: bot_demo
-15000, events_demo 30000, exec_demo 14000). Выход — `Ctrl+C`: остановка корректная,
-журнал закрывается штатно.
+Аргументы всех демо: `--duration МС`, `--ledger ПУТЬ`, `--seed N`
+(по умолчанию — энтропия из RDTSC). Выход — `Ctrl+C`, журнал
+закрывается штатно.
 
-Демо `bot_demo` (v0.1) показывает на симулированных ответах:
-
-- ветки `SUCCESS` / `ERROR` / `PENDING` (HTTP 202 — фоновая задача);
-- **429 + Retry-After**: задержка повтора никогда не меньше разрешённой
-  источником (jitter не даёт спросить раньше срока);
-- **экспоненциальный backoff + jitter** (рост 3.0с → 4.5с → … при базе 0.9с
-  и RA=3с виден в логе);
-- **401**: перманентная ошибка — опрос останавливается («ожидание не лечит
-  авторизацию»);
-- **circuit breaker**: CLOSED → OPEN → HALF_OPEN → CLOSED;
-- **token-bucket**: переполнение лимита → отложенный повтор;
-- блокирующие «HTTP-запросы» в **пуле потоков**, продолжения — в цикле;
-- **Event Ledger**: JSONL-журнал + дедупликация по uuid;
-- **глобальный обработчик ошибок**: счётчики по severity/domain,
-  события `error.reported` в журнале.
-
-Демо `events_demo` (реестр событий) дополнительно показывает:
-
-- живой конвейер `core -> ratelimit -> breaker -> http -> http_resp`;
-- **загрузку/выгрузку шагов на ходу**: `cache` вставляется перед `http`
-  и выгружается, `ratelimit` и `http` снимаются и `http` возвращается
-  на своё место — цепочка не переписывается;
-- **слежение за живыми событиями**: dump каждые 6 с — QUEUED/ACTIVE/BLOCKED
-  с полным следом шагов и контекстом ошибки;
-- **контекст блокировок**: токен через N мс; `OPEN с t=…, cooldown=… ->
-  probe_at=…` (урок t=102); Retry-After; backoff; «проба занята»;
-- **мост к планировщику** (BLOCKED → таймер → продолжение) и
-  **мост к журналу** (терминальные → `event.trace` в JSONL);
-- ветку 401: перманентная ошибка — событие FAILED с контекстом;
-
-Демо `exec_demo` (механизм торговли, v0.2) показывает:
-
-- **одну сделку = одно событие**: конвейер `preflight -> ratelimit ->
-  breaker -> quote -> balance -> approve -> execute -> settle -> commit`;
-- **атомарность через торговый слот**: провал на любом шаге — откат всех
-  мутаций балансов (аналог revert в одной транзакции);
-- **нативный вход/выход**: wrap на входе (вход целиком уходит
-  маршрутизатору, wrapped не остаётся), unwrap на выходе;
-- **PENDING**: ордер принят бэкендом → `trade.submitted` → поллинг →
-  заполнение (202-семантика конвертов);
-- **retryable-отказ DEX**: backoff и полный повтор цепочки — слот не
-  списывает вход дважды;
-- **slippage-защиту**: выход ниже `amount_out_min` — ордер провален,
-  балансы целы;
-- отказы валидации (дедлайн, баланс, маршрут) — до любых мутаций;
-- баланс-лист до/после: провалившиеся сделки балансов не меняют.
+| Демо | Что показывает |
+|---|---|
+| `bot_demo` | опрос источников на симуляторе: ветки SUCCESS/ERROR/PENDING, 429+Retry-After, backoff+jitter, 401-стоп, circuit breaker, token-bucket, пул+цикл, Event Ledger с дедупликацией, глобальный обработчик ошибок |
+| `events_demo` | живой конвейер шагов: загрузка/выгрузка на ходу, слежение за событиями, контекст блокировок, мосты к планировщику и журналу |
+| `exec_demo` | механизм торговли: конвейер preflight→commit, атомарность слота (провал = откат), wrap/unwrap, PENDING-поллинг, retryable-повторы, slippage-защита, баланс-лист до/после |
+| `arb_demo` | арбитражный конвейер: фильтры 1–4, Decision Engine (минимальная ставка до верха контракта), shadow-исполнение; `--replay` — офлайн на mock-RPC, `--live-exec` — из Safe (раздел 11) |
 
 ---
 
@@ -114,25 +73,30 @@ make markers
 
 ```
 tradebot-core/
-├── CMakeLists.txt           # основная сборка (ctest, опция TB_ENABLE_MARKERS)
-├── Makefile                 # запасной путь без CMake (цели markers/run-exec)
-├── include/tb/              # публичные заголовки (C-ABI, C++-совместимы)
-│   ├── core/                #   error, error_registry, log, time, alloc,
-│   │                        #   marker (printf-маркеры), strutil (utf8)
-│   ├── sched/               #   task, pqueue, timer, loop, threadpool, backoff
-│   ├── runtime/             #   ratelimit, breaker
-│   ├── events/              #   events (реестр), builtins (шаги-шлюзы)
-│   ├── ledger/              #   ledger
-│   ├── exec/                #   codes, u256, route, wallet, backend, engine
-│   │                        #   (механизм торговли)
-│   ├── json/                #   envelope (C-ABI поверх C++/rapidjson)
-│   └── arch/                #   arch (asm-хот-споты)
-├── src/                     # реализация (зеркалит include/)
-│   ├── core/  sched/  arch/  runtime/  events/  ledger/  exec/  json/  demo/
-├── tests/                   # 15 тестов: unit + интеграционные
-├── docs/                    # образцы журналов (ledger, events_demo, exec_demo)
-└── third_party/rapidjson/   # вендоренный rapidjson (header-only)
+├── CMakeLists.txt / Makefile   # сборка (основная + запасной путь без CMake)
+├── setup.sh                    # одна команда: зависимости + сборка + тесты
+├── include/tb/                 # публичные заголовки (C-ABI)
+│   ├── core/     #   error, registry, ids, detail, keccak, log, time, alloc
+│   ├── sched/    #   task, pqueue, timer, loop, threadpool, backoff
+│   ├── runtime/  #   ratelimit, breaker
+│   ├── events/   #   events (реестр), builtins (шаги-шлюзы)
+│   ├── ledger/   #   ledger
+│   ├── exec/     #   codes, u256, route, wallet, backend, backend_dex,
+│   │             #   safe_exec (живое исполнение из Safe), engine
+│   ├── net/      #   http (транспорт net/replay)
+│   ├── sign/     #   tx (ключ, RLP, EIP-1559)
+│   ├── user/     #   arb (фильтры 1–4, Decision Engine, рантайм)
+│   ├── json/     #   envelope, config (C++/rapidjson с C-ABI)
+│   └── arch/     #   arch (asm-хот-споты)
+├── src/            # реализация (зеркалит include/)
+├── tests/          # 26 тестов: unit + интеграционные
+├── docs/           # образцы журналов, arb_config.example.json
+└── third_party/    # rapidjson, mbedtls, secp256k1 (вендор)
 ```
+
+Библиотеки: `tb_core` (C11), `tb_net` (HTTP/TLS), `tb_sign`
+(EIP-1559), `tb_dex` (DEX-адаптер + Safe), `tb_user` (арбитраж),
+`tb_runtime` (C++/rapidjson). Демо и тесты линкуются против них.
 
 Библиотеки: `tb_core` (C11) и `tb_runtime` (C++20, зависит от tb_core).
 Демо и тесты линкуются против них.
