@@ -93,6 +93,15 @@ target_include_directories(tb_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(tb_net PUBLIC tb_core mbedtls mbedx509 mbedcrypto)
 
 # ---------------------------------------------------------------------------
+#  tb_dex — живой DEX-адаптер за tb_exec_backend_t (QuoterV2 через RPC)
+# ---------------------------------------------------------------------------
+add_library(tb_dex STATIC
+  src/exec/backend_dex.c
+)
+target_include_directories(tb_dex PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(tb_dex PUBLIC tb_net tb_core)
+
+# ---------------------------------------------------------------------------
 #  tb_runtime — C++20-обвязка (готовый rapidjson вендорится в third_party)
 # ---------------------------------------------------------------------------
 add_library(tb_runtime STATIC
@@ -143,6 +152,7 @@ set(TB_C_TESTS
   test_route
   test_wallet
   test_net
+  test_backend_dex
 )
 foreach(name IN LISTS TB_C_TESTS)
   add_executable(${name} tests/${name}.c)
@@ -151,6 +161,7 @@ foreach(name IN LISTS TB_C_TESTS)
   set_tests_properties(${name} PROPERTIES TIMEOUT 30)
 endforeach()
 target_link_libraries(test_net PRIVATE tb_net)
+target_link_libraries(test_backend_dex PRIVATE tb_dex)
 
 add_executable(test_envelope tests/test_envelope.cpp)
 target_link_libraries(test_envelope PRIVATE tb_runtime)
