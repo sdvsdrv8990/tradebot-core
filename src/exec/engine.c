@@ -211,6 +211,13 @@ static void record_trade(tb_exec_engine_t *e, tb_event_t *ev, exec_ctx_t *c,
             tb_registry_meta(err ? err->domain : 0, err ? err->code : 0);
         char msg_esc[2 * TB_ERROR_MSG_MAX];
         json_escape(err ? err->message : "", msg_esc, sizeof(msg_esc));
+        char det[512];
+        char det_esc[2 * sizeof(det)];
+        if (err && err->details_n
+            && tb_error_format_details(err, det, sizeof(det)) > 0)
+            json_escape(det, det_esc, sizeof(det_esc));
+        else
+            det_esc[0] = '\0';
         n = snprintf(payload, sizeof(payload),
                      "{\"schema_version\":\"1.0\",\"source\":\"%s\","
                      "\"operation\":\"swap_exact_in\",\"status\":\"ERROR\","
@@ -218,7 +225,7 @@ static void record_trade(tb_exec_engine_t *e, tb_event_t *ev, exec_ctx_t *c,
                      "\"error\":{\"code\":\"%s\",\"domain\":\"%s\","
                      "\"group\":\"%s\","
                      "\"severity\":\"%s\",\"retryable\":%s,"
-                     "\"retry_after_ms\":%u,\"message\":\"%s\"}}",
+                     "\"retry_after_ms\":%u,\"message\":\"%s\",\"details\":\"%s\"}}",
                      e->backend.name, (unsigned long long)ev->id,
                      (unsigned long long)tb_wall_ms(),
                      meta ? meta->name : "UNKNOWN",
@@ -226,7 +233,7 @@ static void record_trade(tb_exec_engine_t *e, tb_event_t *ev, exec_ctx_t *c,
                      tb_group_name(err ? err->group : TB_G_UNASSIGNED),
                      tb_severity_name((tb_severity_t)(err ? err->severity : 0)),
                      (err && err->retryable) ? "true" : "false",
-                     err ? err->retry_after_ms : 0, msg_esc);
+                     err ? err->retry_after_ms : 0, msg_esc, det_esc);
     }
     if (n < 0 || (size_t)n >= sizeof(payload))
         return;

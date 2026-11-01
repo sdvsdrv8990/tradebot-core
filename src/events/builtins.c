@@ -138,6 +138,13 @@ static void ledger_observer(tb_evreg_t *r, tb_event_t *ev, void *user)
 
     char msg_esc[2 * TB_ERROR_MSG_MAX];
     json_escape_into(ev->err.message, msg_esc, sizeof(msg_esc));
+    char det[512];
+    char det_esc[2 * sizeof(det)];
+    if (ev->err.details_n
+        && tb_error_format_details(&ev->err, det, sizeof(det)) > 0)
+        json_escape_into(det, det_esc, sizeof(det_esc));
+    else
+        det_esc[0] = '\0';
 
     const tb_error_meta_t *meta = tb_registry_meta(ev->err.domain, ev->err.code);
 
@@ -150,7 +157,7 @@ static void ledger_observer(tb_evreg_t *r, tb_event_t *ev, void *user)
                      "\"error\":{\"domain\":\"%s\",\"group\":\"%s\","
                      "\"code\":\"%s\","
                      "\"severity\":\"%s\",\"retryable\":%s,"
-                     "\"http_status\":%d,\"retry_after_ms\":%u,\"message\":\"%s\"},"
+                     "\"http_status\":%d,\"retry_after_ms\":%u,\"message\":\"%s\",\"details\":\"%s\"},"
                      "\"trace\":\"%s\"}",
                      (unsigned long long)ev->id, ev->kind,
                      tb_ev_state_name((tb_ev_state_t)ev->state),
@@ -160,7 +167,7 @@ static void ledger_observer(tb_evreg_t *r, tb_event_t *ev, void *user)
                      tb_severity_name((tb_severity_t)ev->err.severity),
                      ev->err.retryable ? "true" : "false",
                      ev->err.http_status, ev->err.retry_after_ms,
-                     msg_esc, trace_esc);
+                     msg_esc, det_esc, trace_esc);
     } else {
         n = snprintf(payload, sizeof(payload),
                      "{\"reg_event\":%llu,\"kind\":%u,\"state\":\"%s\","

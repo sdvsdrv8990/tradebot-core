@@ -222,8 +222,24 @@ static void decide_work(void *arg)
             tb_error_t qerr = TB_ERROR_INIT;
             int rc = tb_arb_eval_pair(&a->cfg, &pin, decide_quote, a, &e->r,
                                       &qerr);
-            if (rc < 0)
-                continue; /* ошибка котировщика: пару пропускаем */
+            if (rc < 0) {
+                /* не глотаем: причина и развёрнутые детали — в запись */
+                a->stats.quote_errors++;
+                e->buy_i = i;
+                e->sell_i = j;
+                snprintf(e->r.reason, sizeof(e->r.reason),
+                         "ошибка котировщика: %s", qerr.message);
+                if (qerr.details_n) {
+                    char det[384];
+                    if (tb_error_format_details(&qerr, det, sizeof(det)) > 0) {
+                        size_t off = strlen(e->r.reason);
+                        snprintf(e->r.reason + off,
+                                 sizeof(e->r.reason) - off, " | %s", det);
+                    }
+                }
+                d->results_n++;
+                continue;
+            }
             e->buy_i = i;
             e->sell_i = j;
             d->results_n++;

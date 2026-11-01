@@ -169,6 +169,7 @@ typedef struct tb_arb_stats {
     uint64_t filter_rejects;  /* снапшотов отсеяно фильтрами */
     uint64_t pairs_evaluated;
     uint64_t pairs_profitable;
+    uint64_t quote_errors;     /* пар отброшено по ошибке котировщика */
     uint64_t orders_submitted;
     uint64_t orders_canceled; /* отмены по невыгодности */
     uint64_t cancel_fee_wei;  /* моделируемый потерянный газ */

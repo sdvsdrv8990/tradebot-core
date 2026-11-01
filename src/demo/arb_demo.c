@@ -465,9 +465,11 @@ int main(int argc, char **argv)
            (unsigned long long)as->polls,
            (unsigned long long)as->quotes,
            (unsigned long long)as->filter_rejects);
-    printf("Пар оценено: %llu | выгодных: %llu | ордеров подано: %llu\n",
+    printf("Пар оценено: %llu | выгодных: %llu | ошибок котировщика: %llu\n",
            (unsigned long long)as->pairs_evaluated,
            (unsigned long long)as->pairs_profitable,
+           (unsigned long long)as->quote_errors);
+    printf("Ордеров подано: %llu\n",
            (unsigned long long)as->orders_submitted);
     printf("Сделки: filled=%llu failed=%llu canceled=%llu (невыгодность)\n",
            (unsigned long long)es->filled,
