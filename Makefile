@@ -22,6 +22,22 @@ OPT     ?= -O2 -g
 CFLAGS    := -std=gnu11 $(OPT) -Iinclude -pthread -Wall -Wextra -Wno-format-truncation -Wno-missing-field-initializers
 CXXFLAGS  := -std=c++20 $(OPT) -Iinclude -Ithird_party/rapidjson/include -pthread -Wall -Wextra -Wno-format-truncation -Wno-missing-field-initializers
 LDFLAGS   := -pthread -lm
+# mbedTLS добавляется к линковке целям, зависящим от tb_net (см. правила)
+LDFLAGS_NET := $(BUILD)/libmbed_tls.a
+
+# ---------- mbedTLS (вендор, TLS для HTTP-транспорта v0.3) ----------
+# Прямая компиляция исходников (конфиги PSA уже в дереве, генерация не нужна).
+MBEDTLS_SRC := $(wildcard third_party/mbedtls/library/*.c)
+MBEDTLS_OBJ := $(patsubst third_party/mbedtls/library/%.c,$(BUILD)/mbedtls/%.o,$(MBEDTLS_SRC))
+MBEDTLS_CFLAGS := -std=c99 -O2 -g -Ithird_party/mbedtls/include -Ithird_party/mbedtls/library
+
+$(BUILD)/libmbed_tls.a: $(MBEDTLS_OBJ)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
+$(BUILD)/mbedtls/%.o: third_party/mbedtls/library/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(MBEDTLS_CFLAGS) -c -o $@ $<
 
 # ---------- источники ----------
 CORE_SRC := \

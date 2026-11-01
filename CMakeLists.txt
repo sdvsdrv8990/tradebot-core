@@ -43,6 +43,17 @@ endif()
 find_package(Threads REQUIRED)
 
 # ---------------------------------------------------------------------------
+#  mbedTLS (вендор в third_party) — TLS для HTTP-транспорта (v0.3).
+#  Собирается только по требованию: цели строятся при линковке на них.
+# ---------------------------------------------------------------------------
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
+set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
+set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
+
+# ---------------------------------------------------------------------------
 #  tb_core — C11-ядро
 # ---------------------------------------------------------------------------
 add_library(tb_core STATIC
