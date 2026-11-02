@@ -203,25 +203,21 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
      * рассинхрон невозможен по построению. */
     for (uint32_t i = 0; i < out->pools_n; i++) {
         tb_arb_pool_t &p = out->pools[i];
-        int v = -1;
-        for (uint32_t k = 0; k < out->dex.venues_n; k++)
-            if (strcmp(out->dex.venues[k].name, p.dex) == 0) {
-                v = (int)k;
-                break;
-            }
-        if (v < 0)
+        tb_exec_dex_venue_t *venue =
+            (tb_exec_dex_venue_t *)tb_arb_venue_by_name(out, p.dex);
+        if (!venue)
             TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
                           "config: pools[%u].dex '%s' нет в rpc[]", i,
                           p.dex);
-        if (out->dex.venues[v].pools_n >= TB_DEX_POOLS_PER_VENUE)
+        if (venue->pools_n >= TB_DEX_POOLS_PER_VENUE)
             TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
                           "config: у биржи %s максимум пулов (%d)", p.dex,
                           TB_DEX_POOLS_PER_VENUE);
-        out->dex.venues[v].pools[out->dex.venues[v].pools_n++] = p.pool;
+        venue->pools[venue->pools_n++] = p.pool;
         /* мультичейн: пул несёт цепь и хаб своей биржи; дефолты venue —
          * после network-секции (chain_id известен только там) */
-        p.chain = out->dex.venues[v].chain_id;
-        p.weth = out->dex.venues[v].weth;
+        p.chain = venue->chain_id;
+        p.weth = venue->weth;
     }
 
     /* filters: {freshness_ms, impact_bp, volatility_bp, probe_mult,
@@ -317,17 +313,17 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
                 out->dex.venues[v].weth = out->weth;
         }
         for (uint32_t i = 0; i < out->pools_n; i++) {
-            if (!out->pools[i].chain || tb_addr_is_native(&out->pools[i].weth))
-                for (uint32_t k = 0; k < out->dex.venues_n; k++)
-                    if (strcmp(out->dex.venues[k].name,
-                               out->pools[i].dex) == 0) {
-                        if (!out->pools[i].chain)
-                            out->pools[i].chain =
-                                out->dex.venues[k].chain_id;
-                        if (tb_addr_is_native(&out->pools[i].weth))
-                            out->pools[i].weth = out->dex.venues[k].weth;
-                        break;
-                    }
+            if (!out->pools[i].chain
+                || tb_addr_is_native(&out->pools[i].weth)) {
+                const tb_exec_dex_venue_t *venue =
+                    tb_arb_venue_by_name(out, out->pools[i].dex);
+                if (venue) {
+                    if (!out->pools[i].chain)
+                        out->pools[i].chain = venue->chain_id;
+                    if (tb_addr_is_native(&out->pools[i].weth))
+                        out->pools[i].weth = venue->weth;
+                }
+            }
         }
     }
 

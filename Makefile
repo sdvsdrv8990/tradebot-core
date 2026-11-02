@@ -89,7 +89,9 @@ NET_SRC     := src/net/http.c
 SIGN_SRC   := src/sign/tx.c
 DEX_SRC     := src/exec/backend_dex.c src/exec/safe_exec.c
 USER_SRC    := src/user/filters.c src/user/decision.c src/user/arb.c \
-              src/user/webui.c
+              src/user/market.c src/user/webui.c
+# tb_sign (EIP-1559/secp256k1) нужен dex (safe_exec) и демо
+SIGN_OBJ    := $(BUILD)/src/sign/tx.o
 
 CORE_OBJ   := $(addprefix $(BUILD)/,$(CORE_SRC:.c=.o))
 RUNTIME_OBJ:= $(addprefix $(BUILD)/,$(RUNTIME_SRC:.cpp=.o))
@@ -115,12 +117,14 @@ ARBDEMO_OBJ := $(BUILD)/src/demo/arb_demo.o
 TEST_C_BINS  := test_error test_registry test_arch test_pqueue test_timer \
         test_backoff test_runtime test_events test_ledger test_loop \
         test_u256 test_route test_wallet test_net test_backend_dex \
-        test_filters test_decision test_config test_ids test_details \
+        test_filters test_decision test_config test_market test_ids test_details \
         test_ctx test_keccak test_sign test_safe_exec
 TEST_CXX_BINS:= test_envelope test_exec
 TEST_BINS    := $(TEST_C_BINS) $(TEST_CXX_BINS)
 
 .PHONY: all debug markers test run run-events run-exec clean
+.DEFAULT_GOAL := all # первое правило файла — secp256k1; без этой
+                  # строки «make» собирал ТОЛЬКО его (баг запасного пути)
 
 all: $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a $(BUILD)/bot_demo \
      $(BUILD)/events_demo $(BUILD)/exec_demo $(BUILD)/arb_demo
@@ -181,9 +185,28 @@ $(BUILD)/events_demo: $(EVTDEMO_OBJ) $(BUILD)/libtb_core.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(EVTDEMO_OBJ) $(BUILD)/libtb_core.a $(LDFLAGS)
 
+$(BUILD)/src/sign/tx.o: src/sign/tx.c
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Ithird_party/secp256k1/include -c -o $@ $<
+
+$(BUILD)/libtb_sign.a: $(SIGN_OBJ)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
 $(BUILD)/exec_demo: $(EXECDEMO_OBJ) $(BUILD)/libtb_core.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(EXECDEMO_OBJ) $(BUILD)/libtb_core.a $(LDFLAGS)
+
+# arb_demo — боевой конвейер: полный набор библиотек (tb_user тянет
+# tb_dex/tb_net/tb_core; tb_runtime — конфиг rapidjson; mbedTLS+secp — TLS/подпись)
+$(BUILD)/arb_demo: $(ARBDEMO_OBJ) $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a \
+        $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a \
+        $(BUILD)/libmbed_tls.a $(BUILD)/libsecp256k1.a
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Ithird_party/mbedtls/include -Ithird_party/secp256k1/include -o $@ $(ARBDEMO_OBJ) \
+        $(BUILD)/libtb_sign.a $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a \
+        $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a $(LDFLAGS_NET) \
+        $(BUILD)/libsecp256k1.a $(LDFLAGS)
 
 $(BUILD)/tests/test_envelope: tests/test_envelope.cpp $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a
 	@mkdir -p $(dir $@)
@@ -206,25 +229,29 @@ $(BUILD)/tests/test_net: tests/test_net.c $(BUILD)/libtb_core.a $(BUILD)/libtb_n
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
 
-$(BUILD)/tests/test_backend_dex: tests/test_backend_dex.c $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
+$(BUILD)/tests/test_backend_dex: tests/test_backend_dex.c $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libmbed_tls.a
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
 
-$(BUILD)/tests/test_filters: tests/test_filters.c $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
+$(BUILD)/tests/test_filters: tests/test_filters.c $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libmbed_tls.a
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
 
-$(BUILD)/tests/test_decision: tests/test_decision.c $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
+$(BUILD)/tests/test_decision: tests/test_decision.c $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libmbed_tls.a
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
 
-$(BUILD)/tests/test_details: tests/test_details.c $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
+$(BUILD)/tests/test_details: tests/test_details.c $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libmbed_tls.a
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+	$(CC) $(CFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
 
-$(BUILD)/tests/test_config: tests/test_config.c $(BUILD)/libtb_runtime.a $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libmbed_tls.a
+$(BUILD)/tests/test_market: tests/test_market.c $(BUILD)/libtb_runtime.a $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libmbed_tls.a
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_runtime.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_runtime.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
+
+$(BUILD)/tests/test_config: tests/test_config.c $(BUILD)/libtb_runtime.a $(BUILD)/libtb_user.a $(BUILD)/libtb_core.a $(BUILD)/libtb_net.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libmbed_tls.a
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Ithird_party/mbedtls/include -o $@ $< $(BUILD)/libtb_user.a $(BUILD)/libtb_runtime.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(LDFLAGS_NET) $(LDFLAGS)
 
 $(BUILD)/tests/test_%: tests/test_%.c $(BUILD)/libtb_core.a
 	@mkdir -p $(dir $@)

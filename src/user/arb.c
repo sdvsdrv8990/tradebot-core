@@ -216,8 +216,6 @@ static void pool_dtor(void *arg)
     batch_release(b);
 }
 
-void batch_maybe_decide(tb_arb_t *a, arb_batch_t *b);
-
 /* ==========================================================================
  *  Фаза 2+3: фильтры + Decision Engine (воркер)
  * ========================================================================== */
@@ -825,7 +823,6 @@ static void arb_poll(tb_loop_t *loop, struct tb_task *task, void *arg)
 
 typedef struct mon_job {
     tb_arb_t  *a;
-    size_t     idx;      /* индекс в a->pending (на момент постановки) */
     uint64_t   event_id;
     tb_u256_t  size;
     tb_u256_t  min_out;
@@ -923,7 +920,6 @@ static void arb_monitor(tb_loop_t *loop, struct tb_task *task, void *arg)
         if (!m)
             continue;
         m->a = a;
-        m->idx = i;
         m->event_id = a->pending[i].event_id;
         m->size = a->pending[i].size;
         m->min_out = a->pending[i].min_out;
@@ -1003,10 +999,7 @@ static void verify_job_work(void *arg)
     verify_job_t *j = arg;
     const tb_arb_cfg_t *cfg = j->cfg;
     const tb_arb_pool_t *p = &cfg->pools[j->pool_idx];
-    const tb_exec_dex_venue_t *v = NULL;
-    for (uint32_t k = 0; k < cfg->dex.venues_n && !v; k++)
-        if (strcmp(cfg->dex.venues[k].name, p->dex) == 0)
-            v = &cfg->dex.venues[k];
+    const tb_exec_dex_venue_t *v = tb_arb_venue_by_name(cfg, p->dex);
     if (!v) {
         j->rc = -1;
         TB_ERROR_SET(&j->err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
@@ -1309,10 +1302,8 @@ int tb_arb_cfg_validate(const tb_arb_cfg_t *cfg, tb_error_t *err)
                           "config: pools[%u].fee нулевой (тир V3 обязателен)",
                           i);
 
-        const tb_exec_dex_venue_t *v = NULL;
-        for (uint32_t k = 0; k < cfg->dex.venues_n && !v; k++)
-            if (strcmp(cfg->dex.venues[k].name, p->dex) == 0)
-                v = &cfg->dex.venues[k];
+        const tb_exec_dex_venue_t *v =
+            tb_arb_venue_by_name(cfg, p->dex);
         if (!v)
             TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
                           "config: pools[%u].dex '%s' нет в rpc[]", i,

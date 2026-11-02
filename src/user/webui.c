@@ -53,6 +53,10 @@ static const char SHELL_HEAD[] =
     "<title>tradebot-core</title><style>"
     ":root{color-scheme:dark}body{font:14px/1.45 system-ui,sans-serif;"
     "background:#111318;color:#d7dce3;margin:0 0 40px}"
+    /* overflow-anchor:none — дашборд патчит ячейки; якорная прокрутка
+     * Chromium на мгновенных изменениях выше точки просмотра дёргала
+     * скролл (вниз-вверх) при каждом обновлении данных */
+    "html{overflow-anchor:none}"
     ".wrap{max-width:1100px;margin:0 auto;padding:0 24px}"
     "h1{font-size:18px;margin:18px 0 2px}.sub{color:#7b8494;font-size:12px}"
     "nav{display:flex;gap:4px;margin:14px 0 4px;border-bottom:1px solid "
@@ -115,7 +119,19 @@ static const char SHELL_JS[] =
     "const inner=dexLogo(v)+'<span title=\"'+esc(v)+'\">'+esc(fee||v)"
     "+'</span>';"
     "return u?('<a class=\"dex\" href=\"'+u+'\" target=\"_blank\" "
-    "rel=\"noreferrer\">'+inner+'</a>'):inner};";
+    "rel=\"noreferrer\">'+inner+'</a>'):inner};"
+    /* Точечное обновление DOM (анти-мерцание): ячейка меняется только
+     * при изменении содержимого — таблица не разбирается, скролл и
+     * логотипы живут. rowsSync пересобирает tbody только при изменении
+     * ЧИСЛА строк. */
+    "const cellSync=(el,h)=>{if(el&&el.__h!==h){el.innerHTML=h;el.__h=h}};"
+    "const trFrom=r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>';"
+    "const rowsSync=(tb,rows)=>{if(!tb)return;"
+    "if(tb.children.length!==rows.length){"
+    "tb.innerHTML=rows.map(trFrom).join('');return}"
+    "for(let i=0;i<rows.length;i++){const tr=tb.children[i],r=rows[i];"
+    "if(tr.children.length!==r.length){tr.innerHTML=trFrom(r);continue}"
+    "for(let j=0;j<r.length;j++)cellSync(tr.children[j],r[j])}};";
 
 /* Собрать страницу: оболочка + навигация (активная подсвечена) + JS.
  * Добавление с клампом: о += без клампа уводит за cap и портит память

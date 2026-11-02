@@ -57,7 +57,8 @@ extern "C" {
 /* kind события реестра для сделки ('E''X'). */
 #define TB_EXEC_KIND_SWAP 0x4558u
 
-#define TB_EXEC_ALLOW_MAX 16
+#define TB_EXEC_ALLOW_MAX 32 /* хабы всех цепей + токены пулов;
+                                 * 16 молча резало при росте сетки */
 #define TB_EXEC_MAX_OPEN  64
 
 /* ---- Ордер (exact-input, как в контракте) ---- */

@@ -420,23 +420,17 @@ static void stop_task(tb_loop_t *loop, tb_task_t *task, void *arg)
 #define WEBUI_MARKET_JSON_MAX (16 * 1024)
 
 static const char DASH_JS[] =
+    /* Каркас один раз; карточки патчатся по-ячейково, таблица журнала —
+     * rowsSync и только когда записи реально сместились. */
+    "let dbuilt=false;"
+    "const dbuild=()=>{if(dbuilt)return;"
     "document.getElementById('page').innerHTML="
     "'<div class=\"cards\" id=\"cards\"></div>'"
     "+'<h2>Последние решения и сделки</h2>'"
     "+'<table><thead><tr><th>время</th><th>тип</th><th>детали</th></tr>"
-    "</thead><tbody id=\"rows\"></tbody></table>';"
-    "async function tick(){try{"
-    "const st=await (await fetch('/api/status')).json();"
-    "document.getElementById('mode').textContent="
-    "esc(st.mode||'')+' · аптайм '+Math.round((st.uptime_ms||0)/1000)+'с';"
-    "document.getElementById('cards').innerHTML=(st.cards||[]).map(k=>"
-    "'<div class=\"card'+(k.cls?' '+k.cls:'')+'\"><b>'+esc(k.v)+'</b>"
-    "<span>'+esc(k.t)+'</span></div>').join('');"
-    "}catch(e){}"
-    "try{"
-    "const lg=await (await fetch('/api/ledger')).json();"
-    "const rows=(lg.records||[]).slice(-40).reverse().map(r=>{"
-    "let d='';const t=r.type||'',p=r.payload||{};"
+    "</thead><tbody id=\"dt\"></tbody></table>';"
+    "dbuilt=true};"
+    "const dashRow=r=>{let d='';const t=r.type||'',p=r.payload||{};"
     "if(t.indexOf('decision.evaluated')===0){"
     "const ps=p.pairs||[];d='пар '+ps.length+'; выгодных '+"
     "ps.filter(x=>x.ok).length;}"
@@ -450,63 +444,94 @@ static const char DASH_JS[] =
     "const cls=t.indexOf('trade.executed')===0?'t-ok':"
     "(t.indexOf('trade.failed')===0?'t-err':"
     "(t.indexOf('trade.submitted')===0?'t-pend':''));"
-    "return '<tr><td>'+fmt(r.ts_ms||0)+'</td><td>'+(cls?('<span "
-    "class=\"tag '+cls+'\">'):'')+esc(t)+(cls?'</span>':'')+'</td><td>'"
-    "+esc(d)+'</td></tr>';}).join('');"
-    "document.getElementById('rows').innerHTML=rows;"
+    "return [fmt(r.ts_ms||0),"
+    "cls?('<span class=\"tag '+cls+'\">'+esc(t)+'</span>'):esc(t),esc(d)]};"
+    "async function tick(){try{"
+    "const st=await (await fetch('/api/status')).json();"
+    "dbuild();"
+    "document.getElementById('mode').textContent="
+    "esc(st.mode||'')+' · аптайм '+Math.round((st.uptime_ms||0)/1000)+'с';"
+    "const cards=st.cards||[];const box=document.getElementById('cards');"
+    "if(box.children.length!==cards.length)"
+    "box.innerHTML=cards.map(k=>'<div class=\"card\"><b></b><span></span></div>').join('');"
+    "cards.forEach((k,i)=>{const c=box.children[i];"
+    "const cls='card'+(k.cls?' '+k.cls:'');"
+    "if(c.className!==cls)c.className=cls;"
+    "cellSync(c.children[0],esc(k.v));"
+    "cellSync(c.children[1],esc(k.t))});"
+    "try{"
+    "const lg=await (await fetch('/api/ledger')).json();"
+    "const recs=lg.records||[];"
+    "const lk=recs.length+':'+(recs[0]?(recs[0].ts_ms||''):'');"
+    "if(changed('dash.lg',lk))"
+    "rowsSync(document.getElementById('dt'),recs.slice(-40).reverse().map(dashRow));"
+    "}catch(e){}"
     "}catch(e){}}";
 
 static const char VENUES_JS[] =
+    /* Каркас строится ОДИН раз; дальше — только точечные патчи ячеек
+     * (cellSync/rowsSync из оболочки): цены меняются без пересборки
+     * таблицы, скролл и логотипы не дёргаются. */
+    "let vbuilt=false;"
+    "const vbuild=()=>{if(vbuilt)return;"
+    "document.getElementById('page').innerHTML="
+    "'<div class=\"cards\" id=\"qcards\"></div>'"
+    "+'<h2>Пары по выгодности (сверху лучшие)</h2>"
+    "<table><thead><tr><th>токен</th><th>покупка</th><th>продажа</th>"
+    "<th>спред</th><th>≈ спред-оценка ETH</th></tr></thead>"
+    "<tbody id=\"pt\"></tbody></table>'"
+    "+'<h2>Пулы под наблюдением</h2>"
+    "<table><thead><tr><th>биржа</th><th>пул</th><th>fee</th>"
+    "<th>TOKEN за пробу</th><th>круг туда-обратно</th><th>блок</th>"
+    "<th>свежесть</th></tr></thead><tbody id=\"pt2\"></tbody></table>';"
+    "vbuilt=true};"
     "async function tick(){try{"
     "const m=await (await fetch('/api/market')).json();"
     "const key=JSON.stringify(m).replace(/\"(ts_ms|uptime_ms)\":\d+/g,'');"
     "if(!changed('venues',key))return;"
+    "vbuild();"
     "document.getElementById('mode').textContent='биржи и цены · '+"
     "((m.venues||[]).length)+' бирж · проба '+eth(m.probe_wei)+' ETH';"
-    "let h='';"
-    "if(m.quote){"
-    "const neg=String(m.quote.profit_wei||'').startsWith('-');"
-    "h+='<div class=\"cards\"><div class=\"card'+(neg?' bad':' good')+'\">"
-    "<b>'+eth(String(m.quote.profit_wei||'').replace(/^-/,''))+'</b>"
-    "<span>реальная котировка '+esc(m.quote.symbol||'')+' · '+esc(m.quote.buy)"
-    "+' → '+esc(m.quote.sell)+' · вход '+eth(m.quote.in_wei)+' ETH</span></div>"
-    "<div class=\"card\"><b>'+bp(m.quote.spread_bp)+'</b>"
-    "<span>оценка спреда той же пары</span></div></div>';}"
-    "h+='<h2>Пары по выгодности (сверху лучшие)</h2>"
-    "<table><thead><tr><th>токен</th><th>покупка</th><th>продажа</th>"
-    "<th>спред</th><th>≈ спред-оценка ETH</th></tr></thead><tbody>';"
-    "h+=(m.pairs||[]).map(p=>'<tr><td>'+tokLogo(p.token)"
+    "const q=m.quote;"
+    "cellSync(document.getElementById('qcards'),"
+    "q?('<div class=\"card'+(String(q.profit_wei||'').startsWith('-')?' bad':' good')+'\">"
+    "<b>'+eth(String(q.profit_wei||'').replace(/^-/,''))+'</b>"
+    "<span>реальная котировка '+esc(q.symbol||'')+' · '+esc(q.buy)"
+    "+' → '+esc(q.sell)+' · вход '+eth(q.in_wei)+' ETH</span></div>'"
+    "+'<div class=\"card\"><b>'+bp(q.spread_bp)+'</b>"
+    "<span>оценка спреда той же пары</span></div>'):'');"
+    "let pairs=(m.pairs||[]).map(p=>["
+    "tokLogo(p.token)"
     "+'<a class=\"dex\" title=\"'+p.token+'\" "
     "href=\"https://etherscan.io/token/'+p.token"
     "+'\" target=\"_blank\" rel=\"noreferrer\">'+esc(p.symbol||"
-    "short(p.token))+'</a></td><td>'"
-    "+dexCell(p.buy)+'</td><td>'+dexCell(p.sell)+'</td>'"
-    "+'<td style=\"color:'+(p.spread_bp>0?'#5dd39e':'#7b8494')+'\">'"
-    "+bp(p.spread_bp)+'</td><td>'+eth(p.profit_est)+'</td></tr>').join('');"
-    "if(!(m.pairs||[]).length)"
-    "h+='<tr><td colspan=\"5\" class=\"mut\">нет свежих пар с положительным "
-    "спредом</td></tr>';"
-    "h+='</tbody></table>';"
-    "h+='<h2>Пулы под наблюдением</h2>"
-    "<table><thead><tr><th>биржа</th><th>пул</th><th>fee</th>"
-    "<th>TOKEN за пробу</th><th>круг туда-обратно</th><th>блок</th>"
-    "<th>свежесть</th></tr></thead><tbody>';"
-    "h+=(m.venues||[]).flatMap(v=>(v.pools||[]).map(pl=>'<tr><td>'"
-    "+dexCell(v.name)+'</td><td title=\"'+esc(pl.pool)+'\">'+short(pl.pool)"
-    "+'</td><td>'+esc(pl.fee)+'</td><td class=\"mut\">'+short(pl.buy_out)"
-    "+'</td><td>'+bp(pl.round_bp-10000)+'</td><td class=\"mut\">'"
-    "+(pl.block||'—')+'</td><td>'+(pl.fresh?'свежая':"
-    "'<span class=\"tag t-err\">устарела</span>')+'</td></tr>')).join('');"
-    "h+='</tbody></table>';"
-    "document.getElementById('page').innerHTML=h;"
-    "}catch(e){document.getElementById('page').innerHTML="
-    "'<h2>котировок ещё нет</h2>';}}";
+    "short(p.token))+'</a>',"
+    "dexCell(p.buy),dexCell(p.sell),"
+    "'<span style=\"color:'+(p.spread_bp>0?'#5dd39e':'#7b8494')+'\">'"
+    "+bp(p.spread_bp)+'</span>',"
+    "eth(p.profit_est)]);"
+    "if(!pairs.length)"
+    "pairs=[['<td colspan=\"5\" class=\"mut\">нет свежих пар с положительным "
+    "спредом</td>']];"
+    "rowsSync(document.getElementById('pt'),pairs);"
+    "const pools=(m.venues||[]).flatMap(v=>(v.pools||[]).map(pl=>["
+    "dexCell(v.name),"
+    "'<span title=\"'+esc(pl.pool)+'\">'+short(pl.pool)+'</span>',"
+    "esc(pl.fee),short(pl.buy_out),bp(pl.round_bp-10000),"
+    "String(pl.block||'—'),"
+    "pl.fresh?'свежая':'<span class=\"tag t-err\">устарела</span>']));"
+    "rowsSync(document.getElementById('pt2'),pools);"
+    "}catch(e){/* каркас жив: данные придёт со следующим тиком */}}";
 
 static const char TRADES_JS[] =
-    "async function tick(){try{"
-    "const lg=await (await fetch('/api/trades')).json();"
-    "const rows=(lg.records||[]).slice(-100).reverse().map(r=>{"
-    "const t=r.type||'',p=r.payload||{},dt=p.data||{};"
+    "let tbuilt=false;"
+    "const tbuild=()=>{if(tbuilt)return;"
+    "document.getElementById('page').innerHTML="
+    "'<table><thead><tr><th>время</th><th>статус</th><th>маршрут</th>"
+    "<th>вход ETH</th><th>выход ETH</th><th>профит ETH</th><th>ордер</th>"
+    "<th>ошибка</th></tr></thead><tbody id=\"tt\"></tbody></table>';"
+    "tbuilt=true};"
+    "const tradeRow=r=>{const t=r.type||'',p=r.payload||{},dt=p.data||{};"
     "let tag='',st=t;"
     "if(t.indexOf('trade.executed')===0){tag='t-ok';st='filled'}"
     "else if(t.indexOf('trade.failed')===0){tag='t-err';st='failed'}"
@@ -516,18 +541,19 @@ static const char TRADES_JS[] =
     "if(dt.amount_in&&dt.amount_out){const d=big(dt.amount_out)"
     "-big(dt.amount_in);prof=(d>=0n?'+':'')+eth(d.toString())}"
     "const errm=(p.error&&p.error.message)?esc(p.error.message):'';"
-    "return '<tr><td>'+fmt(r.ts_ms||0)+'</td><td>'+(tag?('<span "
-    "class=\"tag '+tag+'\">'):'')+st+(tag?'</span>':'')+'</td><td>'"
-    "+short(dt.token_in)+'</td><td>'+eth(dt.amount_in)+'</td><td>'"
-    "+eth(dt.amount_out)+'</td><td>'+prof+'</td><td class=\"mut\">'"
-    "+short(String(dt.order||''))+'</td><td class=\"mut\">'+errm"
-    "+'</td></tr>';}).join('');"
+    "return [fmt(r.ts_ms||0),"
+    "tag?('<span class=\"tag '+tag+'\">'+st+'</span>'):st,"
+    "short(dt.token_in),eth(dt.amount_in),eth(dt.amount_out),prof,"
+    "short(String(dt.order||'')),errm]};"
+    "async function tick(){try{"
+    "const lg=await (await fetch('/api/trades')).json();"
+    "const recs=lg.records||[];"
+    "tbuild();"
     "document.getElementById('mode').textContent='сделки · всего '"
-    "+(lg.records||[]).length;"
-    "document.getElementById('page').innerHTML="
-    "'<table><thead><tr><th>время</th><th>статус</th><th>маршрут</th>"
-    "<th>вход ETH</th><th>выход ETH</th><th>профит ETH</th><th>ордер</th>"
-    "<th>ошибка</th></tr></thead><tbody>'+rows+'</tbody></table>';"
+    "+recs.length;"
+    "const k=recs.length+':'+(recs[0]?(recs[0].ts_ms||''):'');"
+    "if(changed('trades',k))"
+    "rowsSync(document.getElementById('tt'),recs.slice(-100).reverse().map(tradeRow));"
     "}catch(e){}}";
 
 static const tb_web_page_t WEB_PAGES[] = {
@@ -850,8 +876,7 @@ int main(int argc, char **argv)
     ecfg.backend = &dexb_exec; /* инъекция вместо симулятора */
     ecfg.max_amount_in = tb_u256_from_u64(cfg.max_trade_wei);
     ecfg.allow[0] = cfg.weth;
-    for (uint32_t i = 0; i < cfg.pools_n && ecfg.allow_n < TB_EXEC_ALLOW_MAX - 1;
-         i++) {
+    for (uint32_t i = 0; i < cfg.pools_n; i++) {
         bool dup = false;
         for (uint32_t k = 0; k < ecfg.allow_n; k++)
             if (tb_addr_eq(&ecfg.allow[k], &cfg.pools[i].token))
@@ -867,6 +892,25 @@ int main(int argc, char **argv)
             ecfg.allow[1 + ecfg.allow_n++] = cfg.pools[i].weth;
     }
     ecfg.allow_n++; /* +хаб */
+    if (ecfg.allow_n >= TB_EXEC_ALLOW_MAX - 1 && cfg.pools_n > 0) {
+        /* fail-fast: молчаливое обрезание allow отклоняло бы ордера
+         * по неочевидной причине */
+        bool dropped = false;
+        for (uint32_t i = 0; i < cfg.pools_n && !dropped; i++) {
+            bool ok = tb_addr_eq(&cfg.pools[i].token, &cfg.weth);
+            for (uint32_t k = 0; k < ecfg.allow_n && !ok; k++)
+                ok = tb_addr_eq(&ecfg.allow[k], &cfg.pools[i].token)
+                     || tb_addr_eq(&ecfg.allow[k], &cfg.pools[i].weth);
+            dropped = !ok;
+        }
+        if (dropped) {
+            fprintf(stderr,
+                    "allow-лист движка (%d) не вместил все хабы/токены "
+                    "конфига — уменьшите пулы\n",
+                    TB_EXEC_ALLOW_MAX);
+            return 1;
+        }
+    }
     ecfg.rl_rate_per_min = 240;
     ecfg.rl_burst = 60;
     ecfg.br_threshold = 5;

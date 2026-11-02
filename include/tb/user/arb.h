@@ -21,6 +21,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h> /* strcmp в inline-хелпере реестра */
 #include "tb/core/error.h"
 #include "tb/exec/backend_dex.h"
 #include "tb/exec/engine.h"
@@ -102,6 +103,17 @@ int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path, tb_error_t *err);
 
 /* Применить дефолты к нулевым полям. */
 void tb_arb_defaults(tb_arb_cfg_t *cfg);
+
+/* Реестр: биржа по имени (пулы ссылаются на venue полем dex).
+ * NULL — имени нет в rpc[]. */
+static inline const tb_exec_dex_venue_t *
+tb_arb_venue_by_name(const tb_arb_cfg_t *cfg, const char *name)
+{
+    for (uint32_t k = 0; k < cfg->dex.venues_n; k++)
+        if (strcmp(cfg->dex.venues[k].name, name) == 0)
+            return &cfg->dex.venues[k];
+    return NULL;
+}
 
 /* Валидатор целостности конфига (В2, fail-fast до сети): каждый
  * pools[].pool обязан состоять в rpc[].pools ровно одной биржи, её имя —

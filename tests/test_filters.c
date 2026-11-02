@@ -42,8 +42,6 @@ static tb_arb_cfg_t mk_cfg(void)
 
 int main(void)
 {
-    tb_error_t err = TB_ERROR_INIT;
-
     /* ---- 1. Актуальность ---- */
     {
         tb_arb_cfg_t c = mk_cfg();
