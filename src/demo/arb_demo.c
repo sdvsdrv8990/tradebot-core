@@ -454,6 +454,7 @@ static const char DASH_JS[] =
     "cls?('<span class=\"tag '+cls+'\">'+esc(t)+'</span>'):esc(t),esc(d)]};"
     "async function tick(){try{"
     "const st=await (await fetch('/api/status')).json();"
+    "if(!(st.cards&&st.cards.length))return;"
     "dbuild();"
     "document.getElementById('mode').textContent="
     "esc(st.mode||'')+' · аптайм '+Math.round((st.uptime_ms||0)/1000)+'с';"
@@ -820,6 +821,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* ---- журнал: стираем/открываем ДО морды — /api/ledger не должен
+     * отдавать записи прошлого запуска в стартовом окне ---- */
+    remove(ledger_path);
+    tb_ledger_t *ledger =
+        tb_ledger_open(ledger_path, TB_LEDGER_FLUSH_LINE, &err);
+    if (!ledger) {
+        fprintf(stderr, "журнал: %s\n", err.message);
+        return 1;
+    }
+
     /* ---- веб-морда: поднимаем ДО медленных стартерных eth_call —
      * страница отвечает сразу («котировок ещё нет»), данные подтянутся
      * первым решённым батчем; bind из конфига (web.bind) ---- */
@@ -936,14 +947,7 @@ int main(int argc, char **argv)
     }
     app.reg = tb_exec_registry(engine);
 
-    /* ---- журнал ---- */
-    remove(ledger_path);
-    tb_ledger_t *ledger =
-        tb_ledger_open(ledger_path, TB_LEDGER_FLUSH_LINE, &err);
-    if (!ledger) {
-        fprintf(stderr, "журнал: %s\n", err.message);
-        return 1;
-    }
+    /* журнал открыт до морды; движку — тот же экземпляр */
     tb_exec_attach_ledger(engine, ledger);
 
     /* ---- кошелёк: live — истина с цепи (balanceOf Safe), иначе 5 WETH -- */

@@ -1017,6 +1017,15 @@ static void tok_job_work(void *arg)
     j->ok = tb_exec_dex_token_info(j->http, v, &j->out.addr,
                                    j->out.symbol, sizeof(j->out.symbol),
                                    &j->out.decimals, &terr) == 0;
+    if (!j->ok && terr.retryable) {
+        struct timespec ts = { .tv_nsec = 400000000 };
+        nanosleep(&ts, NULL);
+        tb_error_clear(&terr);
+        j->ok = tb_exec_dex_token_info(j->http, v, &j->out.addr,
+                                       j->out.symbol,
+                                       sizeof(j->out.symbol),
+                                       &j->out.decimals, &terr) == 0;
+    }
     if (!j->ok) {
         j->out.symbol[0] = '\0';
         j->out.decimals = 0;
@@ -1049,6 +1058,15 @@ static void verify_job_work(void *arg)
      * mainnet-WETH не существует) */
     j->rc = tb_exec_dex_verify_pool(j->http, v, &p->weth, &p->token,
                                     p->fee, &p->pool, &j->err);
+    if (j->rc != 0 && j->err.retryable) {
+        /* транзиентный сбой RPC не должен валить старт (fail-fast
+         * оставляем для настоящих несоответствий) */
+        struct timespec ts = { .tv_nsec = 400000000 };
+        nanosleep(&ts, NULL);
+        tb_error_clear(&j->err);
+        j->rc = tb_exec_dex_verify_pool(j->http, v, &p->weth, &p->token,
+                                        p->fee, &p->pool, &j->err);
+    }
 }
 
 int tb_arb_cfg_verify(const tb_arb_cfg_t *cfg, tb_http_t *http,

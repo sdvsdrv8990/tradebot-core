@@ -743,9 +743,15 @@ static int rpc_result(tb_http_t *http, const tb_exec_dex_venue_t *v,
     if (!resp)
         TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "rpc_result");
 
-    if (tb_http_request(http, &req, resp, err) != 0 || resp->status != 200) {
+    if (tb_http_request(http, &req, resp, err) != 0) {
+        free(resp);
+        return -1; /* транспорт уже заполнил err (retryable сохранён) */
+    }
+    if (resp->status != 200) {
+        bool transient = resp->status == 429 || resp->status >= 500;
         TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                      "RPC %s: HTTP %ld", v->name, (long)resp->status);
+        err->retryable = transient;
         free(resp);
         return -1;
     }
