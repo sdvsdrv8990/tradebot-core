@@ -52,10 +52,14 @@ typedef struct tb_arb_web_cfg {
 } tb_arb_web_cfg_t;
 
 typedef struct tb_arb_pool {
-    tb_addr_t token;  /* второй токен пары (первый — WETH) */
+    tb_addr_t token;  /* второй токен пары (первый — хаб) */
     tb_addr_t pool;   /* адрес пула V3 */
     uint32_t  fee;    /* fee-тир пула */
     char      dex[TB_DEX_NAME_MAX]; /* ожидаемая биржа (safety-фильтр) */
+    uint64_t  chain;  /* цепь пула (из venue; 0 -> network.chain_id) */
+    tb_addr_t weth;   /* хаб-токен цепи (из venue; 0 -> cfg.weth) —
+                       * заполнено загрузчиком, конвейер читает только
+                       * отсюда */
 } tb_arb_pool_t;
 
 typedef struct tb_arb_cfg {
@@ -121,11 +125,13 @@ typedef struct tb_arb_snap {
     char      dex[TB_DEX_NAME_MAX];
     char      symbol[16];  /* токен с цепи (В5); пусто — короткий адрес */
     uint8_t   decimals;   /* токен с цепи (В5); 0 — неизвестно */
+    uint64_t  chain;      /* цепь пула (мультичейн); 0 — неизвестна */
+    tb_addr_t weth;       /* хаб-токен цепи (маршруты строятся по нему) */
     uint64_t  block;      /* блок котировок батча (В6); 0 — неизвестен */
     uint64_t  ts_ms;      /* момент котировки */
-    tb_u256_t buy_out;    /* TOKEN за probe_wei (WETH -> TOKEN) */
-    tb_u256_t big_out;    /* TOKEN за probe_wei * mult (ликвидность) */
-    tb_u256_t sell_back;  /* WETH за buy_out (TOKEN -> WETH) */
+    tb_u256_t buy_out;    /* TOKEN за probe (hub -> TOKEN) */
+    tb_u256_t big_out;    /* TOKEN за probe * mult (ликвидность) */
+    tb_u256_t sell_back;  /* hub за buy_out (TOKEN -> hub) */
     bool      complete;   /* все три котировки донесены (контракт
                            * контекста: неполный отсекается фильтрами
                            * с явной причиной, а не «арифметикой») */

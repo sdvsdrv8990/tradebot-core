@@ -96,7 +96,11 @@ typedef struct arb_batch {
     uint64_t        seq;
     size_t          remaining;      /* атомика не нужна: меняем в цикле */
     size_t          n;              /* = pools_n, слоты фиксированы */
-    uint64_t        block;          /* блок батча (В6); 0 — не достали */
+    /* мультичейн: свой блок на каждую цепь батча (номер блока одной
+     * цепи не существует на другой); 0 — не достали */
+    uint64_t        chains[TB_DEX_MAX_VENUES];
+    uint64_t        blocks[TB_DEX_MAX_VENUES];
+    uint32_t        chains_n;
     tb_arb_snap_t   snaps[TB_ARB_MAX_POOLS];
     /* Владение батчём — подсчёт ссылок: pool_jobs_n pool_dtor-ов + один
      * слот решающей цепочки (decide_dtor либо отказ submit в
@@ -157,14 +161,21 @@ static void pool_work(void *arg)
     s->fee = p->fee;
     snprintf(s->dex, sizeof(s->dex), "%s", p->dex);
     s->ts_ms = tb_now_ms();
-    s->block = j->batch->block; /* все котировки батча — один блок (В6) */
+    s->chain = p->chain;
+    s->weth = p->weth;
+    /* котировки батча — на блоке СВОЕЙ цепи (В6 + мультичейн) */
+    uint64_t block = 0;
+    for (uint32_t c = 0; c < j->batch->chains_n; c++)
+        if (j->batch->chains[c] == p->chain)
+            block = j->batch->blocks[c];
+    s->block = block;
     const struct tok_info *ti = tok_find(a, &p->token);
     if (ti) {
         snprintf(s->symbol, sizeof(s->symbol), "%s", ti->symbol);
         s->decimals = ti->decimals;
     }
-    /* котировки этого воркера — на блоке батча (В6) */
-    tb_exec_dex_set_quote_block(j->batch->block);
+    /* котировки этого воркера — на блоке цепи пула (В6) */
+    tb_exec_dex_set_quote_block(block);
 
     tb_u256_t probe =
         tb_u256_from_u64(a->cfg.probe_wei ? a->cfg.probe_wei
@@ -174,13 +185,13 @@ static void pool_work(void *arg)
         a->cfg.liquidity_probe_mult ? a->cfg.liquidity_probe_mult : 10;
     (void)tb_u256_mul_u64(&big, &big, mult);
 
-    if (arb_quote_dir(a, &p->pool, p->fee, &a->cfg.weth, &p->token, &probe,
+    if (arb_quote_dir(a, &p->pool, p->fee, &p->weth, &p->token, &probe,
                       &s->buy_out, &err) != 0)
         return; /* пустой снапшот отсеется фильтром актуальности */
-    if (arb_quote_dir(a, &p->pool, p->fee, &a->cfg.weth, &p->token, &big,
+    if (arb_quote_dir(a, &p->pool, p->fee, &p->weth, &p->token, &big,
                       &s->big_out, &err) != 0)
         return;
-    if (arb_quote_dir(a, &p->pool, p->fee, &p->token, &a->cfg.weth,
+    if (arb_quote_dir(a, &p->pool, p->fee, &p->token, &p->weth,
                       &s->buy_out, &s->sell_back, &err) == 0)
         s->complete = true; /* всё донесено: фильтрам можно верить */
 }
@@ -241,8 +252,7 @@ static void decide_work(void *arg)
     tb_arb_t *a = d->a;
     uint64_t now = tb_now_ms();
 
-    /* перекотировки решения — на блоке батча (В6) */
-    tb_exec_dex_set_quote_block(d->batch->block);
+    /* подсказка блока ставится на цепь каждой пары ниже (мультичейн) */
 
     if (getenv("TB_ARB_DEBUG"))
         for (size_t i = 0; i < d->batch->n; i++) {
@@ -279,9 +289,21 @@ static void decide_work(void *arg)
             if (!tb_addr_eq(&d->batch->snaps[i].token,
                             &d->batch->snaps[j].token))
                 continue;
-            /* В6: блоки двух снапов не совпали — курсы несравнимы */
+            /* В6/мультичейн: блоки не совпали или цепи разные — курсы
+             * несравнимы (номер блока чужой цепи не существует) */
+            if (d->batch->snaps[i].chain != d->batch->snaps[j].chain)
+                continue;
             if (d->batch->snaps[i].block != d->batch->snaps[j].block)
                 continue;
+            /* перекотировки решения — на блоке цепи пары */
+            {
+                uint64_t blk = 0;
+                for (uint32_t c = 0; c < d->batch->chains_n; c++)
+                    if (d->batch->chains[c]
+                        == d->batch->snaps[i].chain)
+                        blk = d->batch->blocks[c];
+                tb_exec_dex_set_quote_block(blk);
+            }
 
             tb_arb_pair_in_t pin = {
                 .buy = &d->batch->snaps[i],
@@ -342,13 +364,18 @@ static void decide_work(void *arg)
             struct res_ent *e = &d->results[best];
             const tb_arb_snap_t *bs = &d->batch->snaps[e->buy_i];
             const tb_arb_snap_t *ss = &d->batch->snaps[e->sell_i];
-            tb_addr_t toks[3] = { a->cfg.weth, bs->token, a->cfg.weth };
+            tb_addr_t toks[3] = { bs->weth, bs->token, ss->weth };
             uint32_t fees[2] = { bs->fee, ss->fee };
             tb_error_t rerr = TB_ERROR_INIT;
             tb_route_t r = tb_route_encode(toks, fees, 3, &rerr);
             if (rerr.code == 0) {
                 tb_route_set_pool(&r, 0, &bs->pool);
                 tb_route_set_pool(&r, 1, &ss->pool);
+                /* реальная котировка — на блоке цепи пары */
+                for (uint32_t c = 0; c < d->batch->chains_n; c++)
+                    if (d->batch->chains[c] == bs->chain)
+                        tb_exec_dex_set_quote_block(
+                            d->batch->blocks[c]);
                 tb_u256_t in = tb_u256_from_u64(
                     a->cfg.probe_wei ? a->cfg.probe_wei
                                      : 100000000000000ull);
@@ -468,7 +495,7 @@ static void decide_done(tb_loop_t *loop, void *arg)
 
         tb_arb_snap_t *bs = &d->batch->snaps[e->buy_i];
         tb_arb_snap_t *ss = &d->batch->snaps[e->sell_i];
-        tb_addr_t toks[3] = { a->cfg.weth, bs->token, a->cfg.weth };
+        tb_addr_t toks[3] = { bs->weth, bs->token, ss->weth };
         uint32_t fees[2] = { bs->fee, ss->fee };
 
         tb_error_t rerr = TB_ERROR_INIT;
@@ -605,8 +632,9 @@ static void submit_pool_jobs(tb_arb_t *a, arb_batch_t *b, tb_loop_t *loop)
      * нулевой remaining при отказах уже обработан внутри цикла */
 }
 
-/* Prep-джоба батча (В6): блок цепи ДО котировок — весь батч котируется
- * на одном состоянии, пары сравнимы. Не донеслось — блок 0 (latest). */
+/* Prep-джоба батча (В6 + мультичейн): блок каждой уникальной цепи ДО
+ * котировок — весь батч котируется на одном состоянии каждой цепи,
+ * пары сравнимы в пределах цепи. Не донеслось — блок 0 (latest). */
 typedef struct prep_job {
     tb_arb_t    *a;
     arb_batch_t *batch;
@@ -615,14 +643,30 @@ typedef struct prep_job {
 static void prep_work(void *arg)
 {
     prep_job_t *j = arg;
-    uint64_t blk = 0;
-    if (j->a->cfg.dex.venues_n > 0) {
-        tb_error_t err = TB_ERROR_INIT;
-        if (tb_exec_dex_block_number(j->a->http, &j->a->cfg.dex.venues[0],
-                                     &blk, &err) != 0)
-            blk = 0; /* деградация: latest, блок в снапшотах неизвестен */
+    tb_arb_t *a = j->a;
+
+    /* уникальные цепи пула; RPC первой биржи цепи */
+    for (uint32_t i = 0; i < a->cfg.pools_n; i++) {
+        uint64_t ch = a->cfg.pools[i].chain;
+        bool seen = false;
+        for (uint32_t c = 0; c < j->batch->chains_n && !seen; c++)
+            seen = j->batch->chains[c] == ch;
+        if (seen || j->batch->chains_n >= TB_DEX_MAX_VENUES)
+            continue;
+        const tb_exec_dex_venue_t *v = NULL;
+        for (uint32_t k = 0; k < a->cfg.dex.venues_n && !v; k++)
+            if (a->cfg.dex.venues[k].chain_id == ch)
+                v = &a->cfg.dex.venues[k];
+        uint64_t blk = 0;
+        if (v) {
+            tb_error_t err = TB_ERROR_INIT;
+            if (tb_exec_dex_block_number(a->http, v, &blk, &err) != 0)
+                blk = 0; /* деградация: latest, блок неизвестен */
+        }
+        j->batch->chains[j->batch->chains_n] = ch;
+        j->batch->blocks[j->batch->chains_n] = blk;
+        j->batch->chains_n++;
     }
-    j->batch->block = blk;
 }
 
 static void prep_done(tb_loop_t *loop, void *arg)
@@ -847,10 +891,19 @@ tb_arb_t *tb_arb_create(const tb_arb_cfg_t *cfg, tb_exec_engine_t *engine,
                 continue;
             struct tok_info *ti = &a->toks[a->toks_n++];
             ti->addr = *t;
+            /* символы читаем у биржи той же цепи (токен другой цепи
+             * на этом RPC не существует) */
+            const tb_exec_dex_venue_t *tv = &a->cfg.dex.venues[0];
+            for (uint32_t k = 0; k < a->cfg.dex.venues_n; k++)
+                if (a->cfg.dex.venues[k].chain_id
+                    == a->cfg.pools[i].chain) {
+                    tv = &a->cfg.dex.venues[k];
+                    break;
+                }
             tb_error_t terr = TB_ERROR_INIT;
-            if (tb_exec_dex_token_info(http, &a->cfg.dex.venues[0], t,
-                                       ti->symbol, sizeof(ti->symbol),
-                                       &ti->decimals, &terr) != 0) {
+            if (tb_exec_dex_token_info(http, tv, t, ti->symbol,
+                                       sizeof(ti->symbol), &ti->decimals,
+                                       &terr) != 0) {
                 ti->symbol[0] = '\0';
                 ti->decimals = 0;
                 char th[43];
@@ -1015,6 +1068,29 @@ int tb_arb_cfg_validate(const tb_arb_cfg_t *cfg, tb_error_t *err)
                           ph, p->dex, p->fee);
     }
 
+    /* мультичейн/реестр: имена бирж уникальны (пулы мапятся по имени),
+     * хаб-токен один на цепь (курсы и маршруты сравнимы) */
+    for (uint32_t v1 = 0; v1 < cfg->dex.venues_n; v1++)
+        for (uint32_t v2 = v1 + 1; v2 < cfg->dex.venues_n; v2++) {
+            if (strcmp(cfg->dex.venues[v1].name,
+                       cfg->dex.venues[v2].name) == 0)
+                TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                              "config: две биржи с именем '%s' (реестр "
+                              "мапит пулы по имени)",
+                              cfg->dex.venues[v1].name);
+            if (cfg->dex.venues[v1].chain_id
+                    == cfg->dex.venues[v2].chain_id
+                && !tb_addr_eq(&cfg->dex.venues[v1].weth,
+                               &cfg->dex.venues[v2].weth))
+                TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                              "config: цепь %llu: у '%s' и '%s' разные "
+                              "хабы (weth)",
+                              (unsigned long long)
+                                  cfg->dex.venues[v1].chain_id,
+                              cfg->dex.venues[v1].name,
+                              cfg->dex.venues[v2].name);
+        }
+
     /* один адрес — одна биржа (сводный дедуп; при загрузке из JSON
      * недостижимо, защищает ручную сборку cfg) */
     for (uint32_t v1 = 0; v1 < cfg->dex.venues_n; v1++)
@@ -1054,7 +1130,9 @@ int tb_arb_cfg_verify(const tb_arb_cfg_t *cfg, tb_http_t *http,
         if (tb_addr_is_native(&v->factory))
             continue; /* venue без фабрики: не V3-тип, не проверяем */
         tb_error_t verr = TB_ERROR_INIT;
-        if (tb_exec_dex_verify_pool(http, v, &cfg->weth, &p->token, p->fee,
+        /* хаб — пула (мультичейн: у Base свой WETH, на RPC Base
+         * mainnet-WETH не существует) */
+        if (tb_exec_dex_verify_pool(http, v, &p->weth, &p->token, p->fee,
                                     &p->pool, &verr) != 0) {
             char ph[43];
             tb_addr_to_hex(&p->pool, ph, sizeof(ph));

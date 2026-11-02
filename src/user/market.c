@@ -33,6 +33,22 @@
         }                                                              \
     } while (0)
 
+/* Короткое имя цепи для страницы; неизвестная — её номер. */
+static const char *chain_name(uint64_t chain)
+{
+    switch (chain) {
+    case 1:      return "eth";
+    case 8453:   return "base";
+    case 42161:  return "arbitrum";
+    case 0:      return "?";
+    default: {
+        static char buf[16];
+        snprintf(buf, sizeof(buf), "%llu", (unsigned long long)chain);
+        return buf;
+    }
+    }
+}
+
 int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
                        size_t n, uint64_t now_ms,
                        const tb_arb_route_quote_t *rq, char *out, size_t cap)
@@ -94,12 +110,14 @@ int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
             MK_APPEND("%s{\"pool\":\"%s\",\"token\":\"%s\","
                       "\"symbol\":\"%s\",\"decimals\":%u,"
                       "\"fee\":\"%u.%04u%%\",\"buy_out\":\"%s\","
-                      "\"round_bp\":%u,\"block\":%llu,\"ts_ms\":%llu,"
+                      "\"round_bp\":%u,\"chain\":\"%s\",\"block\":%llu,"
+                      "\"ts_ms\":%llu,"
                       "\"fresh\":%s}",
                       wrote++ ? "," : "", pool_s, tok_s,
                       snaps[i].symbol[0] ? snaps[i].symbol : "",
                       snaps[i].decimals, snaps[i].fee / 10000,
                       snaps[i].fee % 10000, buy_s, round_bp,
+                      chain_name(snaps[i].chain),
                       (unsigned long long)snaps[i].block,
                       (unsigned long long)snaps[i].ts_ms,
                       (now_ms - snaps[i].ts_ms <= fmax) ? "true" : "false");
@@ -122,7 +140,11 @@ int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
                 continue;
             if (!tb_addr_eq(&snaps[i].token, &snaps[j].token))
                 continue;
-            /* В6: разные блоки — цены несравнимы (0 = неизвестен) */
+            /* мультичейн: курсы сравнимы только в одной цепи (номер
+             * блока и хаб чужой цепи не существуют) */
+            if (snaps[i].chain != snaps[j].chain)
+                continue;
+            /* В6: разные блоки — не сравниваем (0 = неизвестен) */
             if (snaps[i].block != snaps[j].block)
                 continue;
             uint32_t r = 0;

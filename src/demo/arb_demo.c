@@ -858,8 +858,15 @@ int main(int argc, char **argv)
                 dup = true;
         if (!dup)
             ecfg.allow[1 + ecfg.allow_n++] = cfg.pools[i].token;
+        /* мультичейн: хаб каждой цепи тоже в allow (ордера идут в нём) */
+        dup = false;
+        for (uint32_t k = 0; k < ecfg.allow_n; k++)
+            if (tb_addr_eq(&ecfg.allow[k], &cfg.pools[i].weth))
+                dup = true;
+        if (!dup && ecfg.allow_n < TB_EXEC_ALLOW_MAX - 1)
+            ecfg.allow[1 + ecfg.allow_n++] = cfg.pools[i].weth;
     }
-    ecfg.allow_n++; /* +WETH */
+    ecfg.allow_n++; /* +хаб */
     ecfg.rl_rate_per_min = 240;
     ecfg.rl_burst = 60;
     ecfg.br_threshold = 5;
@@ -908,10 +915,10 @@ int main(int argc, char **argv)
     tb_wallet_deposit(wallet, &cfg.weth, &start, &err);
 
     /* ---- цикл + мост BLOCKED->таймер ---- */
-    /* 4 воркера: батч 17+ пулов × 3 котировки, каждая — своё TLS-рукопожатие
-     * (транспорт без keep-alive); при 2 воркерах батч ~20 с и снапшоты
-     * перестают проходить собственный фильтр свежести */
-    app.loop = tb_loop_create(4, &err);
+    /* 6 воркеров: батч 30 пулов × 3 котировки (две цепи), каждая — своё
+     * TLS-рукопожатие (транспорт без keep-alive); 4 воркера тянули
+     * батч ~35 с — впритык к свежести */
+    app.loop = tb_loop_create(6, &err);
     if (!app.loop) {
         fprintf(stderr, "цикл: %s\n", err.message);
         return 1;

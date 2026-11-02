@@ -26,6 +26,22 @@
       "url": "https://ethereum-rpc.publicnode.com",
       "router": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
       "factory": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+    },
+    {
+      "name": "uniswap-v3-base",
+      "url": "https://base-rpc.publicnode.com",
+      "chain_id": 8453,
+      "weth": "0x4200000000000000000000000000000000000006",
+      "quoter": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
+      "factory": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+    },
+    {
+      "name": "pancakeswap-v3-base",
+      "url": "https://base-rpc.publicnode.com",
+      "chain_id": 8453,
+      "weth": "0x4200000000000000000000000000000000000006",
+      "quoter": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+      "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"
     }
   ],
   "pools": [
@@ -166,6 +182,48 @@
       "pool": "0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852",
       "fee": 3000,
       "dex": "uniswap-v2"
+    },
+    {
+      "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "pool": "0xb4CB800910B228eD3d0834cF79D697127BBB00e5",
+      "fee": 100,
+      "dex": "uniswap-v3-base"
+    },
+    {
+      "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "pool": "0xd0b53D9277642d899DF5C87A3966A349A798F224",
+      "fee": 500,
+      "dex": "uniswap-v3-base"
+    },
+    {
+      "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "pool": "0x72AB388E2E2F6FAceF59E3C3FA2C4E29011c2D38",
+      "fee": 100,
+      "dex": "pancakeswap-v3-base"
+    },
+    {
+      "token": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
+      "pool": "0x3B8000CD10625AbdC7370fb47eD4D4a9C6311fD5",
+      "fee": 100,
+      "dex": "uniswap-v3-base"
+    },
+    {
+      "token": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
+      "pool": "0xF6C0A374a483101e04EF5F7Ac9Bd15d9142BAC95",
+      "fee": 100,
+      "dex": "pancakeswap-v3-base"
+    },
+    {
+      "token": "0x50c5725949A6F0c72E6C4a641F24049A917DB0CB",
+      "pool": "0x751864805acCC54ce46E09fB7F6c46c907Ac8590",
+      "fee": 100,
+      "dex": "uniswap-v3-base"
+    },
+    {
+      "token": "0x50c5725949A6F0c72E6C4a641F24049A917DB0CB",
+      "pool": "0x88476f48939c802eA75eEd438A3576EFc202b5DD",
+      "fee": 100,
+      "dex": "pancakeswap-v3-base"
     }
   ],
   "network": {
@@ -185,7 +243,9 @@
       "uniswap-v3",
       "pancakeswap-v3",
       "sushiswap-v2",
-      "uniswap-v2"
+      "uniswap-v2",
+      "uniswap-v3-base",
+      "pancakeswap-v3-base"
     ]
   },
   "decision": {

@@ -115,6 +115,35 @@ static void test_stale_snap_excluded(void)
     CHECK(strstr(json, "\"fresh\":true") != NULL);
 }
 
+static void test_different_chains_excluded(void)
+{
+    tb_arb_cfg_t cfg;
+    mk_cfg(&cfg);
+    uint64_t now = tb_now_ms();
+
+    tb_arb_snap_t snaps[2];
+    snaps[0] = mk_snap(0, POOL_UNI_USDC_500, USDC_HEX, 500, "uniswap-v3",
+                       12345, now - 100, 20000, "USDC");
+    /* та же пара, но пул другой ЦЕПИ (base): спред «между цепями» —
+     * бессмысленный, курс другой вселенной */
+    snaps[1] = mk_snap(1, POOL_UNI_USDC_3000, USDC_HEX, 3000, "uniswap-v3",
+                       12345, now - 100, 19900, "USDC");
+    snaps[0].chain = 1;
+    snaps[1].chain = 8453;
+
+    char json[4096];
+    CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
+                             sizeof(json)) == 0);
+    CHECK(strstr(json, "\"spread_bp\"") == NULL); /* разные цепи */
+
+    /* одна цепь — пара возвращается */
+    snaps[1].chain = 1;
+    CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
+                             sizeof(json)) == 0);
+    CHECK(strstr(json, "\"spread_bp\":50") != NULL);
+    CHECK(strstr(json, "\"chain\":\"eth\"") != NULL);
+}
+
 static void test_different_blocks_excluded(void)
 {
     tb_arb_cfg_t cfg;
@@ -247,6 +276,7 @@ int main(void)
 {
     test_pair_fresh_same_block();
     test_stale_snap_excluded();
+    test_different_chains_excluded();
     test_different_blocks_excluded();
     test_route_quote_section();
     test_validator();

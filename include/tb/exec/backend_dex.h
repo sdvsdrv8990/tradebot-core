@@ -48,13 +48,19 @@ typedef enum tb_dex_kind {
 
 /* ---- Биржа (venue): RPC + метод котировки + её пулы ---- */
 typedef struct tb_exec_dex_venue {
-    char       name[TB_DEX_NAME_MAX];          /* "uniswap-v3" — в записях */
+    char       name[TB_DEX_NAME_MAX];          /* "uniswap-v3" — в записях;
+                                                  * уникально (реестр В9) */
     char       rpc_url[TB_HTTP_URL_MAX];       /* JSON-RPC endpoint (HTTPS) */
     char       rpc_host_pinned[TB_HTTP_HOST_MAX]; /* непусто: IP для
                                                      соединения, Host/SNI
                                                      из rpc_url */
     uint8_t    kind;                           /* tb_dex_kind_t; 0 = V3
                                                  * (дефолт прежних конфигов) */
+    uint64_t   chain_id;                       /* цепь venue; 0 при загрузке
+                                                 * -> network.chain_id */
+    tb_addr_t  weth;                           /* хаб-токен цепи; 0 -> общий
+                                                 * cfg.weth (заполняет
+                                                 * загрузчик) */
     tb_addr_t  quoter;                         /* V3: адрес QuoterV2 биржи */
     tb_addr_t  router;                         /* V2: Router02.getAmountsOut */
     tb_addr_t  factory;                        /* V3: getPool(tokenA,tokenB,

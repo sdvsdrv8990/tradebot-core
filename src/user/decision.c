@@ -18,17 +18,17 @@
 #include <string.h>
 
 /* Одна оценка: цепная котировка size через покупку и продажу.
- * Возврат: 1 — profit > 0, 0 — нет, -1 — ошибка котировщика. */
+ * Хаб — weth снапшотов (мультичейн: у каждой цепи свой). */
 static int eval_size(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
                      tb_arb_quote_fn quote, void *qctx, const tb_u256_t *size,
                      tb_u256_t *buy_out, tb_u256_t *sell_out,
                      tb_error_t *err)
 {
-    if (quote(qctx, &p->buy->pool, p->buy->fee, &cfg->weth, &p->buy->token,
-              size, buy_out, err) != 0)
+    if (quote(qctx, &p->buy->pool, p->buy->fee, &p->buy->weth,
+              &p->buy->token, size, buy_out, err) != 0)
         return -1;
     if (quote(qctx, &p->sell->pool, p->sell->fee, &p->sell->token,
-              &cfg->weth, buy_out, sell_out, err) != 0)
+              &p->sell->weth, buy_out, sell_out, err) != 0)
         return -1;
 
     /* profit = sell_out − size − gas − min_profit */

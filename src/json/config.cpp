@@ -153,6 +153,18 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
                                       out->dex.venues_n, s);
                 }
             }
+            { /* мультичейн: цепь и хаб-токен биржи; нет -> общий */
+                uint64_t ch = 0;
+                if (!u64_field(v, "chain_id", &ch))
+                    TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                                  "config: rpc[%u].chain_id",
+                                  out->dex.venues_n);
+                vn.chain_id = ch;
+                if (!addr_field(v, "weth", &vn.weth, err))
+                    TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                                  "config: rpc[%u].weth не адрес",
+                                  out->dex.venues_n);
+            }
             uint64_t tmo = 0;
             if (!u64_field(v, "timeout_ms", &tmo))
                 TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
@@ -190,7 +202,7 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
      * и в одном месте. Двойное объявление (rpc[].pools + pools[]) убрано:
      * рассинхрон невозможен по построению. */
     for (uint32_t i = 0; i < out->pools_n; i++) {
-        const tb_arb_pool_t &p = out->pools[i];
+        tb_arb_pool_t &p = out->pools[i];
         int v = -1;
         for (uint32_t k = 0; k < out->dex.venues_n; k++)
             if (strcmp(out->dex.venues[k].name, p.dex) == 0) {
@@ -206,6 +218,10 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
                           "config: у биржи %s максимум пулов (%d)", p.dex,
                           TB_DEX_POOLS_PER_VENUE);
         out->dex.venues[v].pools[out->dex.venues[v].pools_n++] = p.pool;
+        /* мультичейн: пул несёт цепь и хаб своей биржи; дефолты venue —
+         * после network-секции (chain_id известен только там) */
+        p.chain = out->dex.venues[v].chain_id;
+        p.weth = out->dex.venues[v].weth;
     }
 
     /* filters: {freshness_ms, impact_bp, volatility_bp, probe_mult,
@@ -288,6 +304,32 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
     }
     out->dex.fill_delay_min_ms = (uint32_t)fmin;
     out->dex.fill_delay_max_ms = (uint32_t)fmax;
+
+    /* мультичейн-дефолты (после network): цепь 0 -> network.chain_id
+     * (сам -> 1), хаб 0 -> общий weth конфига; пулы догоняют биржи */
+    {
+        uint64_t dflt_chain =
+            out->dex.safe.chain_id ? out->dex.safe.chain_id : 1;
+        for (uint32_t v = 0; v < out->dex.venues_n; v++) {
+            if (!out->dex.venues[v].chain_id)
+                out->dex.venues[v].chain_id = dflt_chain;
+            if (tb_addr_is_native(&out->dex.venues[v].weth))
+                out->dex.venues[v].weth = out->weth;
+        }
+        for (uint32_t i = 0; i < out->pools_n; i++) {
+            if (!out->pools[i].chain || tb_addr_is_native(&out->pools[i].weth))
+                for (uint32_t k = 0; k < out->dex.venues_n; k++)
+                    if (strcmp(out->dex.venues[k].name,
+                               out->pools[i].dex) == 0) {
+                        if (!out->pools[i].chain)
+                            out->pools[i].chain =
+                                out->dex.venues[k].chain_id;
+                        if (tb_addr_is_native(&out->pools[i].weth))
+                            out->pools[i].weth = out->dex.venues[k].weth;
+                        break;
+                    }
+        }
+    }
 
     /* web: {port, bind, refresh_ms, pages[]} — какие страницы-микромодули
      * подняты; bind — listen-адрес ("0.0.0.0" = с других машин) */
