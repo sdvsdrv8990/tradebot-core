@@ -570,6 +570,12 @@ static void decide_done(tb_loop_t *loop, void *arg)
     if (d->batch->seq > a->last_seq) {
         memcpy(a->last_snaps, d->batch->snaps,
                sizeof(tb_arb_snap_t) * d->batch->n);
+        { /* публикация: единый момент свежести для всего батча
+           * (котировка запинена на один блок) */
+            uint64_t pub = tb_now_ms();
+            for (size_t i = 0; i < d->batch->n; i++)
+                a->last_snaps[i].pub_ms = pub;
+        }
         a->last_n = d->batch->n;
         a->last_seq = d->batch->seq;
         a->last_quote = d->rq; /* В7 */

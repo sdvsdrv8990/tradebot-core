@@ -49,6 +49,15 @@ static const char *chain_name(uint64_t chain)
     }
 }
 
+/* Возраст данных для страницы: от публикации батча (котировка
+ * запинена на один блок — старость у неё одна); старые снапшоты без
+ * pub_ms (ручная сборка/тесты) — от ts_ms. */
+static uint64_t snap_age_ms(const tb_arb_snap_t *s, uint64_t now_ms)
+{
+    return now_ms > s->ts_ms ? now_ms - (s->pub_ms ? s->pub_ms : s->ts_ms)
+                             : 0;
+}
+
 int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
                        size_t n, uint64_t now_ms,
                        const tb_arb_route_quote_t *rq, char *out, size_t cap)
@@ -120,7 +129,9 @@ int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
                       chain_name(snaps[i].chain),
                       (unsigned long long)snaps[i].block,
                       (unsigned long long)snaps[i].ts_ms,
-                      (now_ms - snaps[i].ts_ms <= fmax) ? "true" : "false");
+                      (snap_age_ms(&snaps[i], now_ms) <= fmax)
+                          ? "true"
+                          : "false");
         }
         MK_APPEND("]}");
     }
@@ -129,14 +140,15 @@ int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
          i++) {
         if (!snaps[i].complete)
             continue;
-        /* В1: устаревший снапшот не участвует в сравнении курсов */
-        if (now_ms - snaps[i].ts_ms > fmax)
+        /* В1: устаревший снапшот не участвует в сравнении курсов
+         * (свежесть — от публикации батча) */
+        if (snap_age_ms(&snaps[i], now_ms) > fmax)
             continue;
         for (size_t j = 0; j < n; j++) {
             if (i == j || !snaps[j].complete)
                 continue;
             /* В1: обе стороны пары обязаны быть свежими */
-            if (now_ms - snaps[j].ts_ms > fmax)
+            if (snap_age_ms(&snaps[j], now_ms) > fmax)
                 continue;
             if (!tb_addr_eq(&snaps[i].token, &snaps[j].token))
                 continue;

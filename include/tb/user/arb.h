@@ -141,6 +141,11 @@ typedef struct tb_arb_snap {
     tb_addr_t weth;       /* хаб-токен цепи (маршруты строятся по нему) */
     uint64_t  block;      /* блок котировок батча (В6); 0 — неизвестен */
     uint64_t  ts_ms;      /* момент котировки */
+    uint64_t  pub_ms;     /* момент публикации батча (decide_done);
+                           * вся котировка запинена на один блок — и
+                           * свежесть у неё одна, от публикации. Страница
+                           * и пары считаются от pub_ms; движок решений —
+                           * консервативно от ts_ms (0 -> как ts_ms) */
     tb_u256_t buy_out;    /* TOKEN за probe (hub -> TOKEN) */
     tb_u256_t big_out;    /* TOKEN за probe * mult (ликвидность) */
     tb_u256_t sell_back;  /* hub за buy_out (TOKEN -> hub) */

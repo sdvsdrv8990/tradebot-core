@@ -169,6 +169,47 @@ static void test_different_blocks_excluded(void)
     CHECK(strstr(json, "\"spread_bp\":50") != NULL);
 }
 
+/* Публикация батча: свежесть пар/пулов от pub_ms, не от ts_ms сбора.
+ * Батч при медленном RPC живёт дольше окна — к публикации данные были
+ * бы уже «устаревшими», пары гасли волнами. */
+static void test_pub_freshness(void)
+{
+    tb_arb_cfg_t cfg;
+    mk_cfg(&cfg);
+    uint64_t now = tb_now_ms();
+
+    /* сбор давно, публикация только что: пара ЖИВА */
+    tb_arb_snap_t snaps[2];
+    snaps[0] = mk_snap(0, POOL_UNI_USDC_500, USDC_HEX, 500, "uniswap-v3",
+                       12345, now - 120000, 20000, "USDC");
+    snaps[1] = mk_snap(1, POOL_UNI_USDC_3000, USDC_HEX, 3000, "uniswap-v3",
+                       12345, now - 120000, 19900, "USDC");
+    snaps[0].pub_ms = snaps[1].pub_ms = now - 1000;
+
+    char json[4096];
+    CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
+                             sizeof(json)) == 0);
+    CHECK(strstr(json, "\"spread_bp\":50") != NULL);
+    CHECK(strstr(json, "\"fresh\":true") != NULL);
+
+    /* публикация сама устарела — пара гаснет */
+    snaps[0].pub_ms = snaps[1].pub_ms = now - cfg.freshness_max_ms - 1;
+    CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
+                             sizeof(json)) == 0);
+    CHECK(strstr(json, "\"spread_bp\"") == NULL);
+    CHECK(strstr(json, "\"fresh\":false") != NULL);
+
+    /* без pub_ms (ручная сборка) — прежняя семантика от ts_ms */
+    snaps[0].pub_ms = snaps[1].pub_ms = 0;
+    tb_arb_snap_t fresh2[2];
+    fresh2[0] = snaps[0];
+    fresh2[1] = snaps[1];
+    fresh2[0].ts_ms = fresh2[1].ts_ms = now - 100;
+    CHECK(tb_arb_market_json(&cfg, fresh2, 2, now, NULL, json,
+                             sizeof(json)) == 0);
+    CHECK(strstr(json, "\"spread_bp\":50") != NULL);
+}
+
 static void test_route_quote_section(void)
 {
     tb_arb_cfg_t cfg;
@@ -278,6 +319,7 @@ int main(void)
     test_stale_snap_excluded();
     test_different_chains_excluded();
     test_different_blocks_excluded();
+    test_pub_freshness();
     test_route_quote_section();
     test_validator();
     printf("OK test_market\n");
