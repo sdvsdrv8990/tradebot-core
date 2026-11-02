@@ -16,9 +16,10 @@
 #   mbedtls, mbedx509, mbedcrypto and apidoc targets.
 #
 
-# We specify a minimum requirement of 3.10.2, but for now use 3.5.1 here
-# until our infrastructure catches up.
-cmake_minimum_required(VERSION 3.5.1)
+# Минимум остаётся 3.5.1 (как в апстриме); диапазон до 3.16 сообщает
+# CMake >= 3.27/4.x, что проект работает с политиками до 3.16 — иначе
+# каждая перенастройка предупреждает об отжившей совместимости < 3.10.
+cmake_minimum_required(VERSION 3.5.1...3.16)
 
 include(CMakePackageConfigHelpers)
 
