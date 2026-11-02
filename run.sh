@@ -50,7 +50,9 @@ cmd_stop() {
     fi
     echo "run.sh stop: SIGINT -> pid $p (корректный останов с итогами)"
     kill -INT "$p" 2>/dev/null || true
-    for _ in $(seq 1 100); do          # до 10 с ждём самостоятельного выхода
+    # до 20 с: при остановке бот ждёт в-полёта eth_call (транспорт без
+    # прерывания сокета, ~8 с) — за 10 с итоги не успевали печататься
+    for _ in $(seq 1 200); do
         bot_alive || { rm -f "$PIDFILE"; echo "остановлен"; return 0; }
         sleep 0.1
     done

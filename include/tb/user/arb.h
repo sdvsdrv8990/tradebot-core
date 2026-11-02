@@ -247,6 +247,11 @@ void tb_arb_destroy(tb_arb_t *a);
 int tb_arb_start(tb_arb_t *a, struct tb_loop *loop, tb_error_t *err);
 void tb_arb_stop(tb_arb_t *a);
 
+/* Мгновенный запрос остановки: взводит флаг, по которому воркеры
+ * сворачиваются между RPC. Единственная операция — атомарная запись:
+ * безопасна из обработчика сигнала. Полная остановка — tb_arb_stop. */
+void tb_arb_request_stop(tb_arb_t *a);
+
 const tb_arb_stats_t *tb_arb_stats(const tb_arb_t *a);
 
 /* Статистика RPC цитировщика модуля: реальные eth_call к QuoterV2. */

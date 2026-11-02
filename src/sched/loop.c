@@ -2,6 +2,7 @@
 /* ==========================================================================
  *  tb/sched/loop.c — событийный цикл: epoll + eventfd + таймерное колесо.
  * ========================================================================== */
+#include <stdio.h>
 #include "tb/sched/loop.h"
 
 #include <errno.h>
@@ -41,6 +42,8 @@ struct tb_loop {
 
     volatile bool  stop_requested;
     volatile bool  running;
+    bool           reject_warned; /* атомарно: WARN отклонений — один раз */
+    uint64_t       reject_count;  /* атомарно: отклонённые постинги */
 
     uint64_t        next_task_id;
     uint64_t        next_seq;
@@ -238,6 +241,15 @@ void tb_loop_destroy(tb_loop_t *loop)
     tb_pqueue_destroy(&loop->ready);
     tb_timerwheel_destroy(&loop->wheel);
     pthread_mutex_destroy(&loop->incoming_lock);
+    { /* после join: воркеры дорабатывали блокирующие вызовы — счётчик
+       * отклонённых результатов окончателен только здесь */
+        uint64_t rej = __atomic_load_n(&loop->reject_count,
+                                       __ATOMIC_RELAXED);
+        if (rej)
+            TB_LOG_WARN("loop: отклонено постингов в остановленный "
+                        "цикл: %llu (воркеры дорабатывали блокирующие "
+                        "вызовы)", (unsigned long long)rej);
+    }
     free(loop);
 }
 
@@ -326,11 +338,17 @@ uint64_t tb_loop_post(tb_loop_t *loop, tb_prio_t prio, const char *name,
     if (loop->owner_set && pthread_equal(pthread_self(), loop->owner))
         return spawn_task(loop, prio, name, fn, arg, dtor);
 
-    /* Цикл уже остановлен и не будет дренировать — честно отказываем. */
+    /* Цикл уже остановлен и не будет дренировать — честно отказываем.
+     * На остановке дорабатывающие воркеры сыплются пачкой: логируем
+     * ПЕРВОЕ отклонение и считаем остальные (итог — в destroy). */
     if (loop->owner_set && !tb_atomic_load_bool(&loop->running)) {
         if (dtor) dtor(arg);
-        TB_LOG_WARN("loop: постинг '%s' в остановленный цикл отклонён",
-                    name ? name : "?");
+        if (!__atomic_test_and_set(&loop->reject_warned,
+                                  __ATOMIC_RELAXED)) {
+            TB_LOG_WARN("loop: цикл остановлен — результаты воркеров "
+                        "отклоняются (счётчик в destroy)");
+        }
+        __atomic_fetch_add(&loop->reject_count, 1, __ATOMIC_RELAXED);
         return 0;
     }
 

@@ -46,6 +46,9 @@ typedef struct tb_arb {
     tb_exec_backend_t    dexb;     /* DEX-адаптер котировок */
     tb_loop_t           *loop;
     bool                 running;
+    bool                 stopping; /* атомарно: воркеры сворачиваются
+                                     * между котировками — остановка не
+                                     * ждёт очередь блокирующих RPC */
     uint64_t             poll_seq;
     tb_arb_stats_t       stats;
 
@@ -157,6 +160,8 @@ static void pool_work(void *arg)
     tb_arb_snap_t *s = &j->batch->snaps[j->idx]; /* слот фиксирован */
     tb_error_t err = TB_ERROR_INIT;
 
+    if (tb_atomic_load_bool(&a->stopping))
+        return; /* остановка: очередь воркеров сворачивается мгновенно */
     memset(s, 0, sizeof(*s));
     s->pool_idx = (uint32_t)j->idx;
     s->pool = p->pool;
@@ -191,6 +196,8 @@ static void pool_work(void *arg)
     if (arb_quote_dir(a, &p->pool, p->fee, &p->weth, &p->token, &probe,
                       &s->buy_out, &err) != 0)
         return; /* пустой снапшот отсеется фильтром актуальности */
+    if (tb_atomic_load_bool(&a->stopping))
+        return;
     if (arb_quote_dir(a, &p->pool, p->fee, &p->weth, &p->token, &big,
                       &s->big_out, &err) != 0)
         return;
@@ -311,6 +318,13 @@ static int decide_quote(void *ctx, const tb_addr_t *pool, uint32_t fee,
 {
     decide_job_t *d = ctx;
     tb_arb_t *a = d->a;
+    /* остановка: рвём на границе ЛЮБОГО хопа — решающая фаза гоняет
+     * десятки перекотировок, между парами выхода мало */
+    if (tb_atomic_load_bool(&a->stopping)) {
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "остановка: хоп не котируется");
+        return -1;
+    }
     for (uint32_t i = 0; i < a->cfg.pools_n; i++)
         if (tb_addr_eq(&a->cfg.pools[i].pool, pool)) {
             uint64_t chain = a->cfg.pools[i].chain;
@@ -336,6 +350,8 @@ static void decide_work(void *arg)
 {
     decide_job_t *d = arg;
     tb_arb_t *a = d->a;
+    if (tb_atomic_load_bool(&a->stopping))
+        return; /* остановка: батч не оцениваем, память почистит dtor */
     uint64_t now = tb_now_ms();
 
     /* подсказка блока ставится на цепь каждой пары ниже (мультичейн) */
@@ -366,6 +382,8 @@ static void decide_work(void *arg)
 
     for (size_t i = 0; i < d->batch->n && d->results_n < TB_ARB_MAX_RESULTS;
          i++) {
+        if (tb_atomic_load_bool(&a->stopping))
+            break; /* остановка: решающую фазу не тянем */
         if (!d->verdicts[i].pass)
             continue;
         for (size_t j = 0;
@@ -545,9 +563,22 @@ static void emit_evaluated(tb_arb_t *a, arb_batch_t *b, decide_job_t *d)
     APPEND("]}");
 #undef APPEND
 
+    /* переполнение строки журнала — не терять запись: усечь пары
+     * (самая тяжёлая часть) и пометить */
+    if (strlen(payload) > TB_LEDGER_MAX_LINE - 512) {
+        char *p = strstr(payload, ",\"pairs\":[");
+        if (p) {
+            size_t off = (size_t)(p - payload);
+            snprintf(payload + off, sizeof(payload) - off,
+                     ",\"pairs_truncated\":true}");
+        }
+    }
     tb_error_t lerr = TB_ERROR_INIT;
-    tb_ledger_emit(a->ledger, "decision.evaluated", payload, NULL, NULL,
-                   &lerr);
+    if (tb_ledger_emit(a->ledger, "decision.evaluated", payload, NULL,
+                       NULL, &lerr) != 0)
+        /* потеря записи журнала не должна быть молчаливой */
+        fprintf(stderr, "arb: журнал: decision.evaluated потерян: %s\n",
+                lerr.message);
 }
 
 /* ==========================================================================
@@ -1212,11 +1243,18 @@ int tb_arb_start(tb_arb_t *a, struct tb_loop *loop, tb_error_t *err)
     return 0;
 }
 
+void tb_arb_request_stop(tb_arb_t *a)
+{
+    if (a)
+        tb_atomic_store_bool(&a->stopping, true);
+}
+
 void tb_arb_stop(tb_arb_t *a)
 {
     if (!a || !a->running)
         return;
     a->running = false;
+    tb_atomic_store_bool(&a->stopping, true);
     /* отмена задач — из потока цикла; при остановке цикла задачи и так
      * дренируются (владелец вызывает stop до destroy цикла) */
     a->loop = NULL;

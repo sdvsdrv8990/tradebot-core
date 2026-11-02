@@ -29,7 +29,10 @@
 extern "C" {
 #endif
 
-#define TB_LEDGER_MAX_LINE 4096
+/* Строка журнала вмещает полный батч решающей фазы: 30+ пулов дают
+ * 8-10 КБ payload — прежние 4096 молча браковали ВСЕ decision.evaluated
+ * живых прогонов (replay с короткими мок-числами влезал). */
+#define TB_LEDGER_MAX_LINE (32 * 1024)
 #define TB_LEDGER_DEDUP_WINDOW 65536u
 
 enum {

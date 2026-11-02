@@ -402,6 +402,10 @@ static app_t g_app;
 static void on_sigint(int sig)
 {
     (void)sig;
+    if (g_app.arb)
+        tb_arb_request_stop(g_app.arb); /* атомарно: воркеры сворачиваются
+                                         * между RPC — цикл не ждёт
+                                         * доработки очереди */
     if (g_app.loop)
         tb_loop_stop(g_app.loop); /* как в bot_demo: из обработчика можно */
 }
@@ -410,6 +414,8 @@ static void stop_task(tb_loop_t *loop, tb_task_t *task, void *arg)
 {
     (void)task;
     (void)arg;
+    if (g_app.arb)
+        tb_arb_request_stop(g_app.arb);
     tb_loop_stop(loop);
 }
 
