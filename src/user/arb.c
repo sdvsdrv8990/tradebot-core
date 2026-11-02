@@ -48,11 +48,21 @@ typedef struct tb_arb {
 
     tb_arb_hist_t        hist[TB_ARB_MAX_POOLS];
 
+    /* кэш токенов с цепи (В5): symbol/decimals по адресу пула; пустой
+     * символ — цепь не ответила, страница покажет короткий адрес */
+    struct tok_info {
+        tb_addr_t addr;
+        char      symbol[16];
+        uint8_t   decimals;
+    } toks[TB_ARB_MAX_POOLS];
+    uint32_t             toks_n;
+
     /* последний решённый батч котировок — для веб-страниц (пишет и читает
      * только поток цикла); копия делается в decide_done до free батча */
     tb_arb_snap_t        last_snaps[TB_ARB_MAX_POOLS];
     size_t               last_n;
     uint64_t             last_seq;
+    tb_arb_route_quote_t last_quote; /* В7: реальная котировка лучшей пары */
 
     struct pending_ent {
         uint64_t   event_id;
@@ -86,8 +96,35 @@ typedef struct arb_batch {
     uint64_t        seq;
     size_t          remaining;      /* атомика не нужна: меняем в цикле */
     size_t          n;              /* = pools_n, слоты фиксированы */
+    uint64_t        block;          /* блок батча (В6); 0 — не достали */
     tb_arb_snap_t   snaps[TB_ARB_MAX_POOLS];
+    /* Владение батчём — подсчёт ссылок: pool_jobs_n pool_dtor-ов + один
+     * слот решающей цепочки (decide_dtor либо отказ submit в
+     * batch_maybe_decide). Остановка цикла рвёт done-постинги — без
+     * этого батч утекал. Атомики: отклонённый постинг зовёт dtor из
+     * воркера, успешные — из цикла. */
+    size_t          pool_jobs_n;    /* подано pool_job (до первого submit) */
+    size_t          releases;       /* batch_release исполнено */
+    bool            pools_submitted;/* submit_pool_jobs отработал (prep) */
+    bool            decided;        /* batch_maybe_decide уже позван */
 } arb_batch_t;
+
+static void batch_release(arb_batch_t *b)
+{
+    size_t r = __atomic_fetch_add(&b->releases, 1, __ATOMIC_ACQ_REL) + 1;
+    /* Решили (decided) — счёт до pool_jobs_n + 1: последний release
+     * сделает решающая цепочка. Не решили (remaining застрял > 0 —
+     * остановка цикла отклонила done-постинги) — decide-слот никто не
+     * займёт, последнего пул-релиза достаточно. Все done исполняются
+     * раньше своих dtor-ов на потоке цикла, поэтому к моменту
+     * r == pool_jobs_n флаг decided уже виден; воркерские dtor-ы бывают
+     * только при отклонённых постингах, т.е. когда decided не взведён. */
+    bool decided = __atomic_load_n(&b->decided, __ATOMIC_ACQUIRE);
+    size_t total =
+        __atomic_load_n(&b->pool_jobs_n, __ATOMIC_ACQUIRE) + (decided ? 1 : 0);
+    if (r == total)
+        free(b);
+}
 
 void batch_maybe_decide(tb_arb_t *a, arb_batch_t *b);
 
@@ -96,6 +133,14 @@ typedef struct pool_job {
     arb_batch_t  *batch;  /* владение у decide-цепочки */
     size_t        idx;
 } pool_job_t;
+
+static const struct tok_info *tok_find(const tb_arb_t *a, const tb_addr_t *t)
+{
+    for (uint32_t i = 0; i < a->toks_n; i++)
+        if (tb_addr_eq(&a->toks[i].addr, t))
+            return &a->toks[i];
+    return NULL;
+}
 
 static void pool_work(void *arg)
 {
@@ -112,6 +157,14 @@ static void pool_work(void *arg)
     s->fee = p->fee;
     snprintf(s->dex, sizeof(s->dex), "%s", p->dex);
     s->ts_ms = tb_now_ms();
+    s->block = j->batch->block; /* все котировки батча — один блок (В6) */
+    const struct tok_info *ti = tok_find(a, &p->token);
+    if (ti) {
+        snprintf(s->symbol, sizeof(s->symbol), "%s", ti->symbol);
+        s->decimals = ti->decimals;
+    }
+    /* котировки этого воркера — на блоке батча (В6) */
+    tb_exec_dex_set_quote_block(j->batch->block);
 
     tb_u256_t probe =
         tb_u256_from_u64(a->cfg.probe_wei ? a->cfg.probe_wei
@@ -143,7 +196,10 @@ static void pool_done(tb_loop_t *loop, void *arg)
 
 static void pool_dtor(void *arg)
 {
-    free(arg);
+    pool_job_t *j = arg;
+    arb_batch_t *b = j->batch;
+    free(j);
+    batch_release(b);
 }
 
 void batch_maybe_decide(tb_arb_t *a, arb_batch_t *b);
@@ -161,6 +217,7 @@ typedef struct decide_job {
         tb_arb_pair_res_t r;
         size_t buy_i, sell_i;
     } results[TB_ARB_MAX_RESULTS];
+    tb_arb_route_quote_t rq; /* В7: лучшая пара батча, реальная котировка */
 } decide_job_t;
 
 /* Котировщик для tb_arb_eval_pair: пул ищется в watchlist по адресу. */
@@ -183,6 +240,9 @@ static void decide_work(void *arg)
     decide_job_t *d = arg;
     tb_arb_t *a = d->a;
     uint64_t now = tb_now_ms();
+
+    /* перекотировки решения — на блоке батча (В6) */
+    tb_exec_dex_set_quote_block(d->batch->block);
 
     if (getenv("TB_ARB_DEBUG"))
         for (size_t i = 0; i < d->batch->n; i++) {
@@ -219,6 +279,9 @@ static void decide_work(void *arg)
             if (!tb_addr_eq(&d->batch->snaps[i].token,
                             &d->batch->snaps[j].token))
                 continue;
+            /* В6: блоки двух снапов не совпали — курсы несравнимы */
+            if (d->batch->snaps[i].block != d->batch->snaps[j].block)
+                continue;
 
             tb_arb_pair_in_t pin = {
                 .buy = &d->batch->snaps[i],
@@ -254,6 +317,61 @@ static void decide_work(void *arg)
                 a->stats.pairs_profitable++;
         }
     }
+
+    /* В7: лучшая по спреду пара батча — реальная котировка маршрута
+     * WETH -> TOKEN -> WETH на probe (оценка спреда может завышать:
+     * комиссии обоих хопов и влияние уже внутри числа Quoter). */
+    {
+        int best = -1;
+        uint32_t best_bp = 0;
+        for (size_t k = 0; k < d->results_n; k++) {
+            struct res_ent *e = &d->results[k];
+            if (strncmp(e->r.reason, "ошибка котировщика", 18) == 0)
+                continue; /* брак котировщика парой не считаем */
+            uint32_t r = 0;
+            if (!tb_arb_ratio_bp(&d->batch->snaps[e->buy_i].buy_out,
+                                 &d->batch->snaps[e->sell_i].buy_out, &r)
+                || r <= 10000)
+                continue;
+            if (r - 10000 >= best_bp) {
+                best_bp = r - 10000;
+                best = (int)k;
+            }
+        }
+        if (best >= 0) {
+            struct res_ent *e = &d->results[best];
+            const tb_arb_snap_t *bs = &d->batch->snaps[e->buy_i];
+            const tb_arb_snap_t *ss = &d->batch->snaps[e->sell_i];
+            tb_addr_t toks[3] = { a->cfg.weth, bs->token, a->cfg.weth };
+            uint32_t fees[2] = { bs->fee, ss->fee };
+            tb_error_t rerr = TB_ERROR_INIT;
+            tb_route_t r = tb_route_encode(toks, fees, 3, &rerr);
+            if (rerr.code == 0) {
+                tb_route_set_pool(&r, 0, &bs->pool);
+                tb_route_set_pool(&r, 1, &ss->pool);
+                tb_u256_t in = tb_u256_from_u64(
+                    a->cfg.probe_wei ? a->cfg.probe_wei
+                                     : 100000000000000ull);
+                tb_u256_t out;
+                if (a->dexb.quote(&a->dexb, &r, &in, tb_now_ms(), &out,
+                                  &rerr) == 0) {
+                    tb_arb_route_quote_t *q = &d->rq;
+                    q->ok = true;
+                    snprintf(q->symbol, sizeof(q->symbol), "%s", bs->symbol);
+                    snprintf(q->buy_dex, sizeof(q->buy_dex), "%s", bs->dex);
+                    snprintf(q->sell_dex, sizeof(q->sell_dex), "%s", ss->dex);
+                    q->spread_bp = best_bp;
+                    q->in_wei = in;
+                    q->out_wei = out;
+                    q->profit_neg = tb_u256_cmp(&out, &in) < 0;
+                    if (q->profit_neg)
+                        (void)tb_u256_sub(&q->profit_wei, &in, &out);
+                    else
+                        (void)tb_u256_sub(&q->profit_wei, &out, &in);
+                }
+            }
+        }
+    }
 }
 
 static void decide_done(tb_loop_t *loop, void *arg);
@@ -261,7 +379,7 @@ static void decide_done(tb_loop_t *loop, void *arg);
 static void decide_dtor(void *arg)
 {
     decide_job_t *d = arg;
-    free(d->batch);
+    batch_release(d->batch); /* слот решающей цепочки (последним — free) */
     free(d);
 }
 
@@ -271,7 +389,9 @@ static void decide_dtor(void *arg)
 
 static void emit_evaluated(tb_arb_t *a, arb_batch_t *b, decide_job_t *d)
 {
-    char payload[4096];
+    /* 17+ пулов × ~150 Б/снапшот + пары: 4 КБ уже тесно (усечение
+     * ломало JSON-строку журнала) */
+    char payload[20 * 1024];
     size_t n = 0;
 
 #define APPEND(...)                                                        \
@@ -285,9 +405,11 @@ static void emit_evaluated(tb_arb_t *a, arb_batch_t *b, decide_job_t *d)
     for (size_t i = 0; i < b->n; i++) {
         char ph[43];
         tb_addr_to_hex(&b->snaps[i].pool, ph, sizeof(ph));
-        APPEND("%s{\"pool\":\"%s\",\"dex\":\"%s\",\"age_ms\":%llu,"
+        APPEND("%s{\"pool\":\"%s\",\"dex\":\"%s\",\"block\":%llu,"
+               "\"age_ms\":%llu,"
                "\"impact_bp\":%u,\"vol_bp\":%u,\"pass\":%s,\"reject\":\"%s\"}",
                i ? "," : "", ph, b->snaps[i].dex,
+               (unsigned long long)b->snaps[i].block,
                (unsigned long long)d->verdicts[i].age_ms,
                d->verdicts[i].impact_bp, d->verdicts[i].vol_bp,
                d->verdicts[i].pass ? "true" : "false",
@@ -331,6 +453,7 @@ static void decide_done(tb_loop_t *loop, void *arg)
                sizeof(tb_arb_snap_t) * d->batch->n);
         a->last_n = d->batch->n;
         a->last_seq = d->batch->seq;
+        a->last_quote = d->rq; /* В7 */
     }
 
     emit_evaluated(a, d->batch, d);
@@ -392,12 +515,18 @@ static void decide_done(tb_loop_t *loop, void *arg)
 void batch_maybe_decide(tb_arb_t *a, arb_batch_t *b)
 {
     if (b->remaining > 0)
+        return; /* не все пулы донесены (зовётся из каждого pool_done) */
+    /* remaining дошёл до нуля ровно один раз, но путь отказов submit и
+     * финальная проверка submit_pool_jobs могли бы позвать дважды */
+    bool expected = false;
+    if (!__atomic_compare_exchange_n(&b->decided, &expected, true, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
     a->stats.quotes += b->n;
 
     decide_job_t *d = calloc(1, sizeof(*d));
     if (!d) {
-        free(b);
+        batch_release(b); /* слот решающей цепочки — наш */
         return;
     }
     d->a = a;
@@ -412,10 +541,10 @@ void batch_maybe_decide(tb_arb_t *a, arb_batch_t *b)
         .done = decide_done,
     };
     if (!tb_threadpool_submit(tb_loop_pool(a->loop), &s)) {
-        free(b);
         free(d);
+        batch_release(b); /* слот решающей цепочки — наш */
     }
-    /* успешный submit: владение у пула — batch освободится в decide_dtor */
+    /* успешный submit: слот освободит decide_dtor (последним — free) */
 }
 
 /* ==========================================================================
@@ -430,6 +559,87 @@ static void schedule_poll(tb_arb_t *a)
         return;
     tb_loop_call_later(a->loop, a->cfg.poll_ms ? a->cfg.poll_ms : 8000,
                        TB_PRIO_NORMAL, "arb.poll", arb_poll, a, NULL);
+}
+
+/* Пул-джобы батча: слоты фиксированы индексом, remaining ведёт pool_done. */
+static void submit_pool_jobs(tb_arb_t *a, arb_batch_t *b, tb_loop_t *loop)
+{
+    /* счётчик владельцев фиксируем ДО первого submit: быстрая джоба
+     * может дойти до dtor раньше, чем мы подадим следующую */
+    __atomic_store_n(&b->pool_jobs_n, a->cfg.pools_n, __ATOMIC_RELEASE);
+    __atomic_store_n(&b->pools_submitted, true, __ATOMIC_RELEASE);
+
+    if (a->cfg.pools_n == 0) {
+        batch_maybe_decide(a, b); /* решающая цепочка заберёт владение */
+        return;
+    }
+
+    for (uint32_t i = 0; i < a->cfg.pools_n; i++) {
+        b->remaining++; /* слот заявлен: ниже либо submit, либо отказ */
+        pool_job_t *j = calloc(1, sizeof(*j));
+        bool submitted = false;
+        if (j) {
+            j->a = a;
+            j->batch = b;
+            j->idx = i;
+            tb_pool_submit_t s = {
+                .job = pool_work,
+                .arg = j,
+                .arg_dtor = pool_dtor,
+                .loop = loop,
+                .done_prio = TB_PRIO_HIGH,
+                .done = pool_done,
+            };
+            submitted = tb_threadpool_submit(tb_loop_pool(loop), &s);
+            if (!submitted)
+                free(j);
+        }
+        if (!submitted) {
+            b->remaining--;
+            if (b->remaining == 0)
+                batch_maybe_decide(a, b); /* владение заберёт decide */
+            batch_release(b); /* dtor этого слота не придёт */
+        }
+    }
+    /* remaining > 0: решающую цепочку запустит последний pool_done;
+     * нулевой remaining при отказах уже обработан внутри цикла */
+}
+
+/* Prep-джоба батча (В6): блок цепи ДО котировок — весь батч котируется
+ * на одном состоянии, пары сравнимы. Не донеслось — блок 0 (latest). */
+typedef struct prep_job {
+    tb_arb_t    *a;
+    arb_batch_t *batch;
+} prep_job_t;
+
+static void prep_work(void *arg)
+{
+    prep_job_t *j = arg;
+    uint64_t blk = 0;
+    if (j->a->cfg.dex.venues_n > 0) {
+        tb_error_t err = TB_ERROR_INIT;
+        if (tb_exec_dex_block_number(j->a->http, &j->a->cfg.dex.venues[0],
+                                     &blk, &err) != 0)
+            blk = 0; /* деградация: latest, блок в снапшотах неизвестен */
+    }
+    j->batch->block = blk;
+}
+
+static void prep_done(tb_loop_t *loop, void *arg)
+{
+    prep_job_t *j = arg;
+    submit_pool_jobs(j->a, j->batch, loop);
+}
+
+static void prep_dtor(void *arg)
+{
+    prep_job_t *j = arg;
+    arb_batch_t *b = j->batch;
+    free(j);
+    /* постинг prep-завершения отклонён (остановка): пулы поданы не были
+     * (их подаёт prep_done) — единственный владелец батча здесь */
+    if (!__atomic_load_n(&b->pools_submitted, __ATOMIC_ACQUIRE))
+        free(b);
 }
 
 static void arb_poll(tb_loop_t *loop, struct tb_task *task, void *arg)
@@ -448,31 +658,27 @@ static void arb_poll(tb_loop_t *loop, struct tb_task *task, void *arg)
     b->seq = a->poll_seq;
     b->n = a->cfg.pools_n;
 
-    for (uint32_t i = 0; i < a->cfg.pools_n; i++) {
-        pool_job_t *j = calloc(1, sizeof(*j));
-        if (!j)
-            continue;
-        j->a = a;
-        j->batch = b;
-        j->idx = i;
-        b->remaining++;
-
-        tb_pool_submit_t s = {
-            .job = pool_work,
-            .arg = j,
-            .arg_dtor = pool_dtor,
-            .loop = loop,
-            .done_prio = TB_PRIO_HIGH,
-            .done = pool_done,
-        };
-        if (!tb_threadpool_submit(tb_loop_pool(loop), &s)) {
-            b->remaining--;
-            free(j);
-        }
+    prep_job_t *pj = calloc(1, sizeof(*pj));
+    if (!pj) {
+        submit_pool_jobs(a, b, loop); /* без блока: latest */
+        return;
     }
-    if (b->remaining == 0)
-        batch_maybe_decide(a, b);
-    /* иначе batch освободится цепочкой pool_done -> decide_dtor */
+    pj->a = a;
+    pj->batch = b;
+
+    tb_pool_submit_t s = {
+        .job = prep_work,
+        .arg = pj,
+        .arg_dtor = prep_dtor,
+        .loop = loop,
+        .done_prio = TB_PRIO_HIGH,
+        .done = prep_done,
+    };
+    if (!tb_threadpool_submit(tb_loop_pool(loop), &s)) {
+        free(pj);
+        submit_pool_jobs(a, b, loop);
+    }
+    /* успешный submit: пулы подаст prep_done, владение — у пула */
 }
 
 /* ==========================================================================
@@ -495,6 +701,9 @@ static void mon_work(void *arg)
     mon_job_t *m = arg;
     tb_arb_t *a = m->a;
     tb_error_t err = TB_ERROR_INIT;
+    /* монитор смотрит живой рынок: latest, не блок батча (TLS мог
+     * остаться от предыдущей job этого воркера) */
+    tb_exec_dex_set_quote_block(0);
     m->rc = a->dexb.quote(&a->dexb, &m->route, &m->size, tb_now_ms(),
                           &m->sell_out, &err);
 }
@@ -623,6 +832,36 @@ tb_arb_t *tb_arb_create(const tb_arb_cfg_t *cfg, tb_exec_engine_t *engine,
         free(a);
         return NULL;
     }
+
+    /* В5: symbol/decimals токенов с цепи (RPC первой биржи). Ошибка —
+     * не фатальна: пустой символ = короткий адрес на странице. */
+    if (a->cfg.dex.venues_n > 0) {
+        for (uint32_t i = 0;
+             i < a->cfg.pools_n && a->toks_n < TB_ARB_MAX_POOLS; i++) {
+            const tb_addr_t *t = &a->cfg.pools[i].token;
+            bool dup = false;
+            for (uint32_t k = 0; k < a->toks_n; k++)
+                if (tb_addr_eq(&a->toks[k].addr, t))
+                    dup = true;
+            if (dup || tb_addr_eq(t, &a->cfg.weth))
+                continue;
+            struct tok_info *ti = &a->toks[a->toks_n++];
+            ti->addr = *t;
+            tb_error_t terr = TB_ERROR_INIT;
+            if (tb_exec_dex_token_info(http, &a->cfg.dex.venues[0], t,
+                                       ti->symbol, sizeof(ti->symbol),
+                                       &ti->decimals, &terr) != 0) {
+                ti->symbol[0] = '\0';
+                ti->decimals = 0;
+                char th[43];
+                tb_addr_to_hex(t, th, sizeof(th));
+                fprintf(stderr,
+                        "arb: токен %s: symbol/decimals не получены (%s), "
+                        "покажем адрес\n",
+                        th, terr.message);
+            }
+        }
+    }
     return a;
 }
 
@@ -697,7 +936,134 @@ const tb_arb_snap_t *tb_arb_last_snap(const tb_arb_t *a, size_t i)
     return &a->last_snaps[i];
 }
 
+const tb_arb_snap_t *tb_arb_last_snaps(const tb_arb_t *a, size_t *n)
+{
+    if (n)
+        *n = a ? a->last_n : 0;
+    return a ? a->last_snaps : NULL;
+}
+
+const tb_arb_route_quote_t *tb_arb_route_quote(const tb_arb_t *a)
+{
+    if (!a || !a->last_quote.ok)
+        return NULL;
+    return &a->last_quote;
+}
+
 uint64_t tb_arb_probe_wei(const tb_arb_t *a)
 {
     return a ? a->cfg.probe_wei : 0;
+}
+
+/* ==========================================================================
+ *  Валидация конфига (В2) и проверка идентичности на цепи (В4)
+ * ========================================================================== */
+
+int tb_arb_cfg_validate(const tb_arb_cfg_t *cfg, tb_error_t *err)
+{
+    if (!cfg)
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                      "validate: аргументы");
+    if (cfg->pools_n == 0)
+        TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                      "config: pools пуст — торговать нечем");
+
+    /* В9: реестр строится по pools[].dex в загрузчике, поэтому сверять
+     * два объявления больше нечего; здесь — семантика записей и
+     * защита ручной сборки cfg. */
+    for (uint32_t i = 0; i < cfg->pools_n; i++) {
+        const tb_arb_pool_t *p = &cfg->pools[i];
+        char ph[43];
+        tb_addr_to_hex(&p->pool, ph, sizeof(ph));
+
+        for (uint32_t k = 0; k < i; k++)
+            if (tb_addr_eq(&cfg->pools[k].pool, &p->pool))
+                TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                              "config: пул %s объявлен дважды "
+                              "(pools[%u] и pools[%u])",
+                              ph, k, i);
+        if (p->dex[0] == '\0')
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: pools[%u].dex пуст", i);
+        if (p->fee == 0)
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: pools[%u].fee нулевой (тир V3 обязателен)",
+                          i);
+
+        const tb_exec_dex_venue_t *v = NULL;
+        for (uint32_t k = 0; k < cfg->dex.venues_n && !v; k++)
+            if (strcmp(cfg->dex.venues[k].name, p->dex) == 0)
+                v = &cfg->dex.venues[k];
+        if (!v)
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: pools[%u].dex '%s' нет в rpc[]", i,
+                          p->dex);
+        bool listed = false;
+        for (uint32_t q = 0; q < v->pools_n && !listed; q++)
+            listed = tb_addr_eq(&v->pools[q], &p->pool);
+        if (!listed)
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: пул %s (%s) не приписан бирже "
+                          "(реестр: pools[].dex)",
+                          ph, p->dex);
+        /* V2: комиссия пары фиксирована 0.30% — иное значение означало бы
+         * чужой пул; V3: тир произвольный */
+        if (v->kind == TB_DEX_V2 && p->fee != 3000)
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: пул %s (%s, V2): fee %u, у V2 фиксировано "
+                          "3000",
+                          ph, p->dex, p->fee);
+    }
+
+    /* один адрес — одна биржа (сводный дедуп; при загрузке из JSON
+     * недостижимо, защищает ручную сборку cfg) */
+    for (uint32_t v1 = 0; v1 < cfg->dex.venues_n; v1++)
+        for (uint32_t q1 = 0; q1 < cfg->dex.venues[v1].pools_n; q1++)
+            for (uint32_t v2 = v1; v2 < cfg->dex.venues_n; v2++)
+                for (uint32_t q2 = (v2 == v1 ? q1 + 1 : 0);
+                     q2 < cfg->dex.venues[v2].pools_n; q2++)
+                    if (tb_addr_eq(&cfg->dex.venues[v1].pools[q1],
+                                   &cfg->dex.venues[v2].pools[q2]))
+                        TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                                      "config: пул приписан двум биржам "
+                                      "(%s и %s)",
+                                      cfg->dex.venues[v1].name,
+                                      cfg->dex.venues[v2].name);
+    return 0;
+}
+
+int tb_arb_cfg_verify(const tb_arb_cfg_t *cfg, tb_http_t *http,
+                      tb_error_t *err)
+{
+    if (!cfg || !http)
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                      "verify: аргументы");
+    uint32_t checked = 0;
+    for (uint32_t i = 0; i < cfg->pools_n; i++) {
+        const tb_arb_pool_t *p = &cfg->pools[i];
+        const tb_exec_dex_venue_t *v = NULL;
+        for (uint32_t k = 0; k < cfg->dex.venues_n && !v; k++)
+            for (uint32_t q = 0; q < cfg->dex.venues[k].pools_n; q++)
+                if (tb_addr_eq(&cfg->dex.venues[k].pools[q], &p->pool)) {
+                    v = &cfg->dex.venues[k];
+                    break;
+                }
+        if (!v)
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "verify: пул вне venues (сначала validate)");
+        if (tb_addr_is_native(&v->factory))
+            continue; /* venue без фабрики: не V3-тип, не проверяем */
+        tb_error_t verr = TB_ERROR_INIT;
+        if (tb_exec_dex_verify_pool(http, v, &cfg->weth, &p->token, p->fee,
+                                    &p->pool, &verr) != 0) {
+            char ph[43];
+            tb_addr_to_hex(&p->pool, ph, sizeof(ph));
+            TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                         "пул %s (%s): %s", ph, p->dex, verr.message);
+            return -1;
+        }
+        checked++;
+    }
+    (void)checked;
+    return 0;
 }

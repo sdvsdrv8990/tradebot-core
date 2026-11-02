@@ -22,6 +22,7 @@
 
 #include "tb/arch/arch.h"
 #include "tb/core/detail.h"
+#include "tb/core/keccak.h"
 #include "tb/core/time.h"
 
 /* ---- Состояние ---- */
@@ -178,6 +179,15 @@ static void hex_word64(const char *hex_value, size_t len, char out[65])
     out[64] = '\0';
 }
 
+/* ---- Пин блока котировок (TLS): батч пинится своим блоком (В6) ---- */
+
+static _Thread_local uint64_t t_quote_block; /* 0 -> "latest" */
+
+void tb_exec_dex_set_quote_block(uint64_t block)
+{
+    t_quote_block = block;
+}
+
 /* ---- eth_call к QuoterV2: один хоп ---- */
 
 static const tb_exec_dex_venue_t *venue_by_pool(const dex_ctx_t *c,
@@ -192,43 +202,73 @@ static const tb_exec_dex_venue_t *venue_by_pool(const dex_ctx_t *c,
     return NULL;
 }
 
-/* Котировка одного хопа: out = quoter(tokenIn -> tokenOut, fee, in).
+/* Котировка одного хопа: out = venue-метод(tokenIn -> tokenOut, fee, in).
+ * V3 — QuoterV2.quoteExactInputSingle, V2 — Router.getAmountsOut.
  * 0 — успех. */
 static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
                          const tb_addr_t *tin, const tb_addr_t *tout,
                          uint32_t fee, const tb_u256_t *amount_in,
                          tb_u256_t *out, tb_error_t *err)
 {
-    char qhex[43], inhex[43], ahex[80];
-    tb_addr_to_hex(&venue->quoter, qhex, sizeof(qhex));
+    char inhex[43], ahex[80];
     tb_addr_to_hex(tin, inhex, sizeof(inhex));
     tb_addr_to_hex(tout, ahex, sizeof(ahex)); /* out-токен */
     char amt[80];
     u256_to_hex(amount_in, amt, sizeof(amt));
 
-    /* calldata: selector + tokenIn + tokenOut + amountIn + fee + 0 —
-     * каждое поле выровнено в 32-байтовое слово нулями слева. */
-    char w_in[65], w_out[65], w_amt[65], w_fee[65], w_zero[65];
-    hex_word64(inhex + 2, 40, w_in);
-    hex_word64(ahex + 2, 40, w_out);
-    hex_word64(amt + 2, strlen(amt) - 2, w_amt);
-    {
-        char feehex[17];
-        snprintf(feehex, sizeof(feehex), "%x", fee);
-        hex_word64(feehex, strlen(feehex), w_fee);
+    const bool is_v2 = venue->kind == TB_DEX_V2;
+    char qhex[43];
+    tb_addr_to_hex(is_v2 ? &venue->router : &venue->quoter, qhex,
+                   sizeof(qhex));
+
+    char data[8 + 64 * 5 + 8]; /* "0x" + селектор + до 5 слов (V3) */
+    if (is_v2) {
+        /* getAmountsOut(uint256, address[]): сумма, смещение 0x40,
+         * длина пути 2, токены; комиссия 0.30% — внутри котировки */
+        if (tb_addr_is_native(&venue->router))
+            TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                          "dex: venue %s (V2) без router", venue->name);
+        uint8_t sel[4];
+        tb_keccak_selector("getAmountsOut(uint256,address[])", sel);
+        char w_amt[65], w_len[65];
+        hex_word64(amt + 2, strlen(amt) - 2, w_amt);
+        hex_word64("2", 1, w_len);
+        snprintf(data, sizeof(data), "0x%02x%02x%02x%02x%s%s%s%s%s",
+                 sel[0], sel[1], sel[2], sel[3], w_amt,
+                 "00000000000000000000000000000000000000000000000000000000"
+                 "00000040",
+                 w_len, inhex + 2, ahex + 2);
+    } else {
+        /* quoteExactInputSingle((in, out, amount, fee, sqrtLimit)) */
+        char w_in[65], w_out[65], w_amt[65], w_fee[65], w_zero[65];
+        hex_word64(inhex + 2, 40, w_in);
+        hex_word64(ahex + 2, 40, w_out);
+        hex_word64(amt + 2, strlen(amt) - 2, w_amt);
+        {
+            char feehex[17];
+            snprintf(feehex, sizeof(feehex), "%x", fee);
+            hex_word64(feehex, strlen(feehex), w_fee);
+        }
+        hex_word64("", 0, w_zero);
+        snprintf(data, sizeof(data), "0x%08x%s%s%s%s%s", 0xc6a5026au,
+                 w_in, w_out, w_amt, w_fee, w_zero);
     }
-    hex_word64("", 0, w_zero);
 
-    char data[8 + 64 * 5 + 8]; /* "0x" + селектор + 5 слов */
-    snprintf(data, sizeof(data), "0x%08x%s%s%s%s%s", 0xc6a5026au,
-             w_in, w_out, w_amt, w_fee, w_zero);
+    /* пин блока потока: батч котируется на одном блоке (В6), latest —
+     * для свежих котировок submit/monitor */
+    char block_param[24];
+    if (t_quote_block)
+        snprintf(block_param, sizeof(block_param), "\"0x%llx\"",
+                 (unsigned long long)t_quote_block);
+    else
+        snprintf(block_param, sizeof(block_param), "\"latest\"");
 
-    char body[640];
+    char body[704];
     int n = snprintf(body, sizeof(body),
                      "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\","
                      "\"params\":[{\"to\":\"%s\",\"data\":\"%s\"},"
-                     "\"latest\"],\"id\":1}",
-                     qhex, data);
+                     "%s],\"id\":1}",
+                     qhex, data, block_param);
     if (n < 0 || (size_t)n >= sizeof(body))
         TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                       "RPC-запрос не влез в буфер");
@@ -326,10 +366,70 @@ static int dex_quote_hop(dex_ctx_t *c, const tb_exec_dex_venue_t *venue,
         DEX_ATTACH_HOP(res);
         goto out;
     }
-    /* ответ QuoterV2 — 4 слова; слово 0 (первые 32 байта) = amountOut */
     if (getenv("TB_DEX_DEBUG"))
         fprintf(stderr, "[dex] result hex (rlen=%zu): %.134s\n", rlen, res);
-    if (hex_to_u256(out, res, rlen > 66 ? 66 : rlen, err) != 0) {
+
+    if (is_v2) {
+        /* ответ Router.getAmountsOut — uint[]: [offset 0x20][len][суммы];
+         * нужна последняя (выход всего пути) */
+        if (rlen < 2 + 64 * 3 || (rlen - 2) % 64 != 0) {
+            tb_atomic_add_u64(&c->stats.rpc_errors, 1);
+            DEX_ATTACH_HOP(res);
+            TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                         "RPC %s: getAmountsOut ответил не массив "
+                         "(rlen=%zu)",
+                         venue->name, rlen);
+            goto out;
+        }
+        /* слово 1 = длина массива; элемент i — слово (2 + i) */
+        size_t arr_len = 0;
+        for (size_t i = 0; i < 64; i++) {
+            size_t d = hex_val(res[2 + 64 + i]);
+            if (d == (size_t)-1) {
+                tb_atomic_add_u64(&c->stats.rpc_errors, 1);
+                DEX_ATTACH_HOP(res);
+                TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                             "RPC %s: getAmountsOut длина не hex",
+                             venue->name);
+                goto out;
+            }
+            arr_len = arr_len * 16 + d;
+            if (arr_len > 64) { /* защита от мусора */
+                tb_atomic_add_u64(&c->stats.rpc_errors, 1);
+                DEX_ATTACH_HOP(res);
+                TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                             "RPC %s: getAmountsOut длина безумна (%zu)",
+                             venue->name, arr_len);
+                goto out;
+            }
+        }
+        if (arr_len == 0 || (rlen - 2) / 64 < arr_len + 2) {
+            tb_atomic_add_u64(&c->stats.rpc_errors, 1);
+            DEX_ATTACH_HOP(res);
+            TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                         "RPC %s: getAmountsOut короче длины (%zu)",
+                         venue->name, arr_len);
+            goto out;
+        }
+        /* последнее слово массива -> out */
+        *out = tb_u256_from_u64(0);
+        const char *last = res + 2 + 64 * (1 + arr_len);
+        for (size_t i = 0; i < 64; i++) {
+            size_t d = hex_val(last[i]);
+            if (d == (size_t)-1) {
+                tb_atomic_add_u64(&c->stats.rpc_errors, 1);
+                DEX_ATTACH_HOP(res);
+                TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                             "RPC %s: getAmountsOut элемент не hex",
+                             venue->name);
+                goto out;
+            }
+            (void)tb_u256_mul_u64(out, out, 16);
+            tb_u256_t add = tb_u256_from_u64(d);
+            (void)tb_u256_add(out, out, &add);
+        }
+    } else if (hex_to_u256(out, res, rlen > 66 ? 66 : rlen, err) != 0) {
+        /* ответ QuoterV2 — 4 слова; слово 0 (первые 32 байта) = amountOut */
         tb_atomic_add_u64(&c->stats.rpc_errors, 1);
         DEX_ATTACH_HOP(res);
         TB_ERROR_WRAP(err, "RPC %s", venue->name);
@@ -586,6 +686,21 @@ int tb_exec_dex_init(tb_exec_backend_t *b, tb_http_t *http,
             TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
                           "dex: venue %u без rpc_url или пулов", v);
         }
+        /* метод котировки обязан быть настроен (fail-fast, не на хопе) */
+        if (c->cfg.venues[v].kind == TB_DEX_V2
+            && tb_addr_is_native(&c->cfg.venues[v].router)) {
+            free(c);
+            TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                          "dex: venue %u (%s, V2) без router", v,
+                          c->cfg.venues[v].name);
+        }
+        if (c->cfg.venues[v].kind != TB_DEX_V2
+            && tb_addr_is_native(&c->cfg.venues[v].quoter)) {
+            free(c);
+            TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                          "dex: venue %u (%s, V3) без quoter", v,
+                          c->cfg.venues[v].name);
+        }
     }
 
     b->name = "dex-rpc";
@@ -602,4 +717,303 @@ const tb_exec_dex_stats_t *tb_exec_dex_stats(const tb_exec_backend_t *b)
     if (!b || !b->ctx)
         return NULL;
     return &((dex_ctx_t *)b->ctx)->stats;
+}
+
+/* ==========================================================================
+ *  Стартерные вызовы к цепи (В4/В5/В6): блокирующие, только на старте или
+ *  из воркеров пула. Транспорт/RPC — из venue; бэкенд не нужен.
+ * ========================================================================== */
+
+/* POST JSON-RPC и вынуть поле "result" (hex-строка без изменений) в буфер
+ * вызывающего. 0 — донесено (в т.ч. "0x" — пустой ответ). */
+static int rpc_result(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                      const char *body, char *result, size_t result_cap,
+                      tb_error_t *err)
+{
+    tb_http_req_t req = {0};
+    strcpy(req.method, "POST");
+    strcpy(req.url, v->rpc_url);
+    if (v->rpc_host_pinned[0])
+        strcpy(req.host_pinned, v->rpc_host_pinned);
+    req.body = body;
+    req.body_len = strlen(body);
+    req.timeout_ms = v->timeout_ms ? v->timeout_ms : 8000;
+
+    tb_http_resp_t *resp = calloc(1, sizeof(*resp));
+    if (!resp)
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "rpc_result");
+
+    if (tb_http_request(http, &req, resp, err) != 0 || resp->status != 200) {
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "RPC %s: HTTP %ld", v->name, (long)resp->status);
+        free(resp);
+        return -1;
+    }
+    resp->body[resp->body_len < TB_HTTP_BODY_MAX ? resp->body_len
+                                                 : TB_HTTP_BODY_MAX - 1] = '\0';
+
+    size_t rlen = 0;
+    const char *res = json_str_field(resp->body, "result", &rlen);
+    if (!res || json_has_error(resp->body)) {
+        size_t mlen = 0;
+        const char *msg = json_str_field(resp->body, "message", &mlen);
+        char mbuf[128] = "нет сообщения";
+        if (msg && mlen < sizeof(mbuf)) {
+            memcpy(mbuf, msg, mlen);
+            mbuf[mlen] = '\0';
+        }
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND, "RPC %s: %s",
+                     v->name, mbuf);
+        free(resp);
+        return -1;
+    }
+    if (rlen >= result_cap)
+        rlen = result_cap - 1;
+    memcpy(result, res, rlen);
+    result[rlen] = '\0';
+    free(resp);
+    return 0;
+}
+
+/* eth_call(to, data) -> result hex. */
+static int chain_call(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                      const tb_addr_t *to, const char *data_hex, char *result,
+                      size_t result_cap, tb_error_t *err)
+{
+    char tohex[43], body[512]; /* to + селектор + до трёх ABI-слов */
+    tb_addr_to_hex(to, tohex, sizeof(tohex));
+    int n = snprintf(body, sizeof(body),
+                     "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\","
+                     "\"params\":[{\"to\":\"%s\",\"data\":\"%s\"},"
+                     "\"latest\"],\"id\":1}",
+                     tohex, data_hex);
+    if (n < 0 || (size_t)n >= sizeof(body))
+        TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND, "eth_call: calldata");
+    return rpc_result(http, v, body, result, result_cap, err);
+}
+
+int tb_exec_dex_block_number(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                             uint64_t *block, tb_error_t *err)
+{
+    char result[80];
+    if (rpc_result(http, v,
+                   "{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\","
+                   "\"params\":[],\"id\":1}",
+                   result, sizeof(result), err) != 0)
+        return -1;
+    size_t len = strlen(result);
+    if (len < 2 || result[0] != '0' || result[1] != 'x' || len == 2)
+        TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                      "eth_blockNumber: некорректный результат '%.32s'",
+                      result);
+    *block = strtoull(result + 2, NULL, 16);
+    return 0;
+}
+
+int tb_exec_dex_verify_pool(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                            const tb_addr_t *token_a, const tb_addr_t *token_b,
+                            uint32_t fee, const tb_addr_t *expect_pool,
+                            tb_error_t *err)
+{
+    if (tb_addr_is_native(&v->factory))
+        return 0; /* фабрика не задана: проверять нечем (с предупреждением
+                     на совести вызывающего) */
+
+    const bool is_v2 = v->kind == TB_DEX_V2;
+    uint8_t sel[4];
+    if (is_v2)
+        tb_keccak_selector("getPair(address,address)", sel);
+    else
+        tb_keccak_selector("getPool(address,address,uint24)", sel);
+
+    char ahex[43], bhex[43], wa[65], wb[65], wfee[65];
+    tb_addr_to_hex(token_a, ahex, sizeof(ahex));
+    tb_addr_to_hex(token_b, bhex, sizeof(bhex));
+    hex_word64(ahex + 2, 40, wa);
+    hex_word64(bhex + 2, 40, wb);
+
+    char data[8 + 64 * 3 + 3];
+    if (is_v2) {
+        snprintf(data, sizeof(data), "0x%02x%02x%02x%02x%s%s", sel[0],
+                 sel[1], sel[2], sel[3], wa, wb);
+    } else {
+        char feehex[17];
+        snprintf(feehex, sizeof(feehex), "%x", fee);
+        hex_word64(feehex, strlen(feehex), wfee);
+        snprintf(data, sizeof(data), "0x%02x%02x%02x%02x%s%s%s", sel[0],
+                 sel[1], sel[2], sel[3], wa, wb, wfee);
+    }
+
+    char result[80];
+    if (chain_call(http, v, &v->factory, data, result, sizeof(result),
+                   err) != 0) {
+        TB_ERROR_WRAP(err, "%s %s", is_v2 ? "getPair" : "getPool", v->name);
+        return -1;
+    }
+
+    /* ответ — слово; адрес = последние 20 байт (40 hex-символов) */
+    tb_addr_t on_chain;
+    size_t len = strlen(result);
+    char expect_hex[43], got_hex[43];
+    tb_addr_to_hex(expect_pool, expect_hex, sizeof(expect_hex));
+    const char *fn = is_v2 ? "getPair" : "getPool";
+    if (len <= 2) { /* "0x" — фабрика не знает такой пары/fee */
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "%s %s: пула %s нет (фабрика вернула 0x0; "
+                     "пара/fee в конфиге не совпадают с цепью)",
+                     fn, v->name, expect_hex);
+        return -1;
+    }
+    if (len < 42 || (len - 2) % 2 != 0) {
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "%s %s: ответ не слово '%.32s'", fn, v->name, result);
+        return -1;
+    }
+    char addr_hex[43] = "0x";
+    memcpy(addr_hex + 2, result + len - 40, 40);
+    if (tb_addr_from_hex(&on_chain, addr_hex, err) != 0) {
+        TB_ERROR_WRAP(err, "%s %s", fn, v->name);
+        return -1;
+    }
+    tb_addr_to_hex(&on_chain, got_hex, sizeof(got_hex));
+    if (!tb_addr_eq(&on_chain, expect_pool)) {
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "%s %s: конфиг 0x%s, фабрика 0x%s",
+                     fn, v->name, expect_hex + 2, got_hex + 2);
+        return -1;
+    }
+    return 0;
+}
+
+/* hex-символ -> значение; -1 — не hex */
+static int nib(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+/* слово ответа ABI (64 hex-символа) по индексу -> u64 (значение слова;
+ * ведущие нули естественны, переполнение u64 отсекается проверками выше) */
+static bool word_u64(const char *hex, size_t nibbles, size_t idx, uint64_t *out)
+{
+    size_t want = (idx + 1) * 64;
+    if (want > nibbles)
+        return false;
+    uint64_t v = 0;
+    for (size_t i = idx * 64; i < want; i++) {
+        int d = nib(hex[i]);
+        if (d < 0)
+            return false;
+        v = (v << 4) | (uint64_t)d;
+    }
+    *out = v;
+    return true;
+}
+
+int tb_exec_dex_token_info(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                           const tb_addr_t *token, char *symbol,
+                           size_t symbol_cap, uint8_t *decimals,
+                           tb_error_t *err)
+{
+    uint8_t sel_sym[4], sel_dec[4];
+    tb_keccak_selector("symbol()", sel_sym);
+    tb_keccak_selector("decimals()", sel_dec);
+
+    char data[13];
+    char result[320]; /* до четырёх ABI-слов (длинные имена/массивы) */
+    symbol[0] = '\0';
+    *decimals = 0;
+
+    snprintf(data, sizeof(data), "0x%02x%02x%02x%02x", sel_sym[0], sel_sym[1],
+             sel_sym[2], sel_sym[3]);
+    if (chain_call(http, v, token, data, result, sizeof(result), err) != 0)
+        return -1;
+
+    size_t len = strlen(result);
+    if (len <= 2 || result[0] != '0' || result[1] != 'x'
+        || (len % 2) != 0) {
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "symbol(): некорректный ответ '%.24s'", result);
+        return -1;
+    }
+    const char *hex = result + 2;
+    size_t nibbles = len - 2;
+
+    if (nibbles == 64) {
+        /* старые токены: bytes32 — байты до первого нуля */
+        size_t o = 0;
+        for (size_t w = 0; w < 32 && o + 1 < symbol_cap; w++) {
+            int hi = nib(hex[w * 2]), lo = nib(hex[w * 2 + 1]);
+            if (hi < 0 || lo < 0)
+                break;
+            char c = (char)((hi << 4) | lo);
+            if (c == '\0')
+                break;
+            symbol[o++] = c;
+        }
+        symbol[o] = '\0';
+    } else {
+        /* строка ABI: слово0 = смещение (0x20), слово1 = длина */
+        uint64_t off, slen;
+        if (!word_u64(hex, nibbles, 0, &off) || off != 0x20
+            || !word_u64(hex, nibbles, 1, &slen)) {
+            TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                         "symbol(): не строка ABI");
+            return -1;
+        }
+        size_t avail = (nibbles - 128) / 2; /* байты после двух слов */
+        if (slen > avail)
+            slen = avail;
+        if (slen > symbol_cap - 1)
+            slen = symbol_cap - 1;
+        for (size_t b = 0; b < slen; b++) {
+            int hi = nib(hex[128 + b * 2]), lo = nib(hex[128 + b * 2 + 1]);
+            if (hi < 0 || lo < 0) {
+                TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                             "symbol(): не hex в данных строки");
+                return -1;
+            }
+            symbol[b] = (char)((hi << 4) | lo);
+        }
+        symbol[slen] = '\0';
+    }
+    if (!symbol[0]) {
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "symbol(): пустой символ у токена");
+        return -1;
+    }
+
+    snprintf(data, sizeof(data), "0x%02x%02x%02x%02x", sel_dec[0], sel_dec[1],
+             sel_dec[2], sel_dec[3]);
+    if (chain_call(http, v, token, data, result, sizeof(result), err) != 0)
+        return -1;
+    len = strlen(result);
+    if (len <= 2 || (len - 2) > 128) { /* одно слово; hex может быть
+                                        * минимальным ("0x6" = 6) */
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "decimals(): некорректный ответ '%.24s'", result);
+        return -1;
+    }
+    uint64_t dec = 0;
+    for (size_t i = 2; i < len; i++) {
+        int d = nib(result[i]);
+        if (d < 0) {
+            TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                         "decimals(): не hex '%.24s'", result);
+            return -1;
+        }
+        dec = (dec << 4) | (uint64_t)d;
+    }
+    if (dec > 255) {
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "decimals(): бессмыслица %llu", (unsigned long long)dec);
+        return -1;
+    }
+    *decimals = (uint8_t)dec;
+    return 0;
 }

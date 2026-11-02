@@ -37,6 +37,7 @@ typedef struct tb_webui tb_webui_t;
 
 #define TB_WEBUI_PAGES_MAX 8
 #define TB_WEBUI_SNAPS_MAX 6
+#define TB_WEBUI_BIND_MAX 16  /* "255.255.255.255" + NUL */
 
 /* Страница-микромодуль. Все строки — статические (живут всё время работы). */
 typedef struct tb_web_page {
@@ -46,10 +47,13 @@ typedef struct tb_web_page {
     const char *js;    /* JS страницы: fetch своего api + рендер в #page */
 } tb_web_page_t;
 
-/* Поднять сервер. Фактический порт — в *out_port (может отличаться,
+/* Поднять сервер. bind_addr — IPv4 для listen ("127.0.0.1" — только
+ * локально, "0.0.0.0" — все интерфейсы, доступ с других машин);
+ * NULL -> 127.0.0.1. Фактический порт — в *out (может отличаться,
  * если занят). ledger_path — путь к JSONL-журналу для /api/ledger(trades). */
 int tb_webui_start(tb_webui_t **out, uint16_t want_port,
-                   const char *ledger_path, tb_error_t *err);
+                   const char *bind_addr, const char *ledger_path,
+                   tb_error_t *err);
 
 /* Зарегистрировать страницу (потокобезопасно; первая — открывается
  * на "/"). Все строки страницы — статические. 0/-1. */

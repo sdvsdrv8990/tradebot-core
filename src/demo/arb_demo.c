@@ -76,34 +76,13 @@ static unsigned __int128 mock_rate(const char *token_in_hex, uint64_t fee)
 }
 
 /* Вычислить amountOut по calldata QuoterV2. */
-static uint64_t mock_quote(const char *data_hex)
+static uint64_t mock_quote(const char *data_hex); /* V3 */
+
+/* Общая математика хопа: направления, тир-модификаторы, влияние размера
+ * (покупка WETH->TOKEN / продажа TOKEN->WETH). */
+static uint64_t mock_hop(const char *in_tok, const char *out_tok,
+                         uint64_t amt, uint32_t fee)
 {
-    /* 0x + selector(8) + tokenIn(64) + tokenOut(64) + amount(64) + fee */
-    const char *w_in = data_hex + 10;
-    const char *w_out = data_hex + 10 + 64;
-    const char *w_amt = data_hex + 10 + 128;
-    const char *w_fee = data_hex + 10 + 192;
-
-    char in_tok[41], out_tok[41];
-    memcpy(in_tok, w_in + 24, 40);
-    in_tok[40] = 0;
-    memcpy(out_tok, w_out + 24, 40);
-    out_tok[40] = 0;
-
-    /* Парсинг строго по границам слов: strtoull без границы пробежал бы
-     * через конец слова в следующие hex-цифры (fee-слово, нули). */
-    char num[32];
-    memcpy(num, w_amt, 16);
-    num[16] = '\0';
-    if (strtoull(num, NULL, 16)) /* старшая четверть слова: > 2^192 */
-        return 0;
-    memcpy(num, w_amt + 48, 16);
-    num[16] = '\0';
-    uint64_t amt = strtoull(num, NULL, 16);
-    memcpy(num, w_fee + 58, 6);
-    num[6] = '\0';
-    uint32_t fee = (uint32_t)strtoul(num, NULL, 16);
-
     bool in_is_weth = strncmp(in_tok, WETH_HEX, 40) == 0;
     bool out_is_weth = strncmp(out_tok, WETH_HEX, 40) == 0;
     /* Тир-модификатор: покупка на «дешёвом» пуле (fee 500) даёт больше
@@ -141,9 +120,151 @@ static uint64_t mock_quote(const char *data_hex)
     return (uint64_t)out;
 }
 
+/* Разбор calldata QuoterV2 -> mock_hop. */
+static uint64_t mock_quote(const char *data_hex)
+{
+    /* 0x + selector(8) + tokenIn(64) + tokenOut(64) + amount(64) + fee */
+    const char *w_in = data_hex + 10;
+    const char *w_out = data_hex + 10 + 64;
+    const char *w_amt = data_hex + 10 + 128;
+    const char *w_fee = data_hex + 10 + 192;
+
+    char in_tok[41], out_tok[41];
+    memcpy(in_tok, w_in + 24, 40);
+    in_tok[40] = 0;
+    memcpy(out_tok, w_out + 24, 40);
+    out_tok[40] = 0;
+
+    /* Парсинг строго по границам слов: strtoull без границы пробежал бы
+     * через конец слова в следующие hex-цифры (fee-слово, нули). */
+    char num[32];
+    memcpy(num, w_amt, 16);
+    num[16] = '\0';
+    if (strtoull(num, NULL, 16)) /* старшая четверть слова: > 2^192 */
+        return 0;
+    memcpy(num, w_amt + 48, 16);
+    num[16] = '\0';
+    uint64_t amt = strtoull(num, NULL, 16);
+    memcpy(num, w_fee + 58, 6);
+    num[6] = '\0';
+    uint32_t fee = (uint32_t)strtoul(num, NULL, 16);
+
+    return mock_hop(in_tok, out_tok, amt, fee);
+}
+
+/* Разбор calldata Router.getAmountsOut(uint256, address[]) -> выход пути.
+ * Комиссия V2 фиксирована 0.30% — тир-модификатор 3000. */
+static uint64_t mock_amounts_out(const char *data_hex)
+{
+    /* 0x + selector(8) + amount(64) + offset(64) + len(64) + tokA + tokB */
+    const char *w_amt = data_hex + 10;
+    const char *w_a = data_hex + 10 + 128;
+    const char *w_b = data_hex + 10 + 192;
+
+    char num[32];
+    memcpy(num, w_amt, 16);
+    num[16] = '\0';
+    if (strtoull(num, NULL, 16))
+        return 0;
+    memcpy(num, w_amt + 48, 16);
+    num[16] = '\0';
+    uint64_t amt = strtoull(num, NULL, 16);
+
+    char in_tok[41], out_tok[41];
+    memcpy(in_tok, w_a + 24, 40);
+    in_tok[40] = 0;
+    memcpy(out_tok, w_b + 24, 40);
+    out_tok[40] = 0;
+    return mock_hop(in_tok, out_tok, amt, 3000);
+}
+
+/* Ответ eth_call symbol()/decimals(): ABI-данные по адресу токена.
+ * Слово-выровненный ответ; symbol — строка ABI, decimals — слово. */
+static int mock_token_call(const char *to_hex, const char *data_hex,
+                           char *result /* до четырёх ABI-слов */)
+{
+    static const struct {
+        const char *hex, *sym;
+        uint32_t dec;
+    } toks[] = {
+        { WETH_HEX, "WETH", 18 },
+        { USDC_HEX, "USDC", 6 },
+        { USDT_HEX, "USDT", 6 },
+        { "6b175474e89094c44da98b954eedeac495271d0f", "DAI", 18 },
+        { "2260fac5e5542a773aa44fbcfedf7c193bc2c599", "WBTC", 8 },
+        { "514910771af9ca656af840dff83e8264ecf986ca", "LINK", 18 },
+        { "1f9840a85d5af5bf1d1762f925bdaddc4201f984", "UNI", 18 },
+        { "95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce", "SHIB", 18 },
+        { "6982508145454ce325ddbe47a25d4ec3d2311933", "PEPE", 18 },
+        { "7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9", "AAVE", 18 },
+        { "5a98fcbea516cf06857215779fd812ca3bef1b32", "LDO", 18 },
+    };
+    uint32_t dec = 0;
+    const char *sym = NULL;
+    for (size_t i = 0; i < sizeof(toks) / sizeof(toks[0]); i++)
+        if (strncasecmp(to_hex, toks[i].hex, 40) == 0) {
+            sym = toks[i].sym;
+            dec = toks[i].dec;
+            break;
+        }
+    if (!sym)
+        return 0;
+
+    if (strncasecmp(data_hex, "0x95d89b41", 10) == 0) { /* symbol() */
+        /* offset(0x20) + len + данные, выровненные в слово */
+        size_t slen = strlen(sym);
+        memset(result + 2, '0', 128);
+        result[2 + 62] = '2'; /* слово0 = 0x20 */
+        result[2 + 63] = '0';
+        for (size_t i = 0; i < 16; i++) {
+            int d = (int)(((slen >> (60 - 4 * i)) & 0xf));
+            result[2 + 64 + 63 - i] = "0123456789abcdef"[d];
+        }
+        for (size_t i = 0; i < slen; i++) { /* байты строки (hex-пара) */
+            result[2 + 128 + i * 2] =
+                "0123456789abcdef"[(sym[i] >> 4) & 0xf];
+            result[2 + 129 + i * 2] = "0123456789abcdef"[sym[i] & 0xf];
+        }
+        result[2 + 192] = '\0'; /* три слова: дальше буфер для V2-массива */
+        return 1;
+    }
+    if (strncasecmp(data_hex, "0x313ce567", 10) == 0) { /* decimals() */
+        memset(result + 2, '0', 64);
+        for (int i = 0; i < 8; i++) /* 8 nibble: значение 32-битное,
+                                     * сдвиг на 32+ — UB и мусор в слове */
+            result[2 + 64 - 1 - i] =
+                "0123456789abcdef"[(dec >> (4 * i)) & 0xf];
+        result[2 + 64] = '\0'; /* одно слово, не 3-словный буфер */
+        return 1;
+    }
+    return 0;
+}
+
+/* hex-символ -> значение; 0 для не-hex (в mock-запросах мусора не бывает:
+ * calldata собирает бот). */
+static unsigned hexv(char c)
+{
+    if (c >= '0' && c <= '9')
+        return (unsigned)(c - '0');
+    if (c >= 'a' && c <= 'f')
+        return (unsigned)(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F')
+        return (unsigned)(c - 'A' + 10);
+    return 0;
+}
+
+/* Значение -> ABI-слово (64 hex-символа, выровнено вправо). */
+static void mock_word_hex(char *dst64, uint64_t v)
+{
+    memset(dst64, '0', 48);
+    for (int i = 0; i < 16; i++)
+        dst64[48 + i] = "0123456789abcdef"[(v >> (4 * (15 - i))) & 0xf];
+}
+
 static void *mock_thread(void *arg)
 {
     mock_rpc_t *m = arg;
+    uint64_t block = 21000000;
     while (!tb_atomic_load_bool(&m->stop)) {
         int c = accept(m->fd, NULL, NULL);
         if (c < 0)
@@ -166,23 +287,55 @@ static void *mock_thread(void *arg)
         }
         body += 4;
 
-        const char *d = strstr(body, "\"data\":\"0x");
-        char result[131] = "0x";
-        memset(result + 2, '0', 128);
-        result[130] = '\0';
+        char result[300] = "0x"; /* до четырёх ABI-слов (массив V2) */
+        memset(result + 2, '0', 256);
+        result[258] = '\0';
         uint64_t out = 0;
         int ok = 0;
-        if (d) {
-            out = mock_quote(d + 8);
+
+        if (strstr(body, "\"eth_blockNumber\"")) { /* В6: блок батча */
+            block++;
+            for (int i = 15; i >= 0; i--) {
+                result[2 + i] = "0123456789abcdef"[block >> (4 * (15 - i)) & 0xf];
+            }
+            result[18] = '\0'; /* компактный hex достаточно */
             ok = 1;
-            for (int i = 0; i < 16; i++) { /* слово 0: значение
-                                             * выровнено ВПРАВО (ABI) */
-                int digit = (int)((out >> ((15 - i) * 4)) & 0xf);
-                result[2 + 48 + i] = "0123456789abcdef"[digit];
+        } else {
+            const char *to = strstr(body, "\"to\":\"0x");
+            const char *d = strstr(body, "\"data\":\"0x");
+            if (getenv("TB_MOCK_DEBUG") && to && d)
+                fprintf(stderr, "[mock] to=%.48s data=%.16s\n", to, d);
+            if (to && d)
+                ok = mock_token_call(to + 8, d + 8, result);
+            if (!ok && d
+                && strncasecmp(d + 8, "0xd06ca61f", 10) == 0) {
+                /* V2: Router.getAmountsOut -> uint[2] [вход, выход] */
+                uint64_t amt = 0;
+                const char *w_amt = d + 8 + 10;
+                for (int i = 48; i < 64; i++)
+                    amt = amt * 16 + (uint64_t)hexv(w_amt[i]);
+                out = mock_amounts_out(d + 8);
+                ok = 1;
+                result[2 + 63] = '2'; /* слово0: смещение 0x20 */
+                result[2 + 64 + 63] = '2'; /* слово1: длина 2 */
+                mock_word_hex(result + 2 + 128, amt);  /* вход */
+                mock_word_hex(result + 2 + 192, out);  /* выход */
+                result[258] = '\0';
+            }
+            if (!ok && d) {
+                out = mock_quote(d + 8);
+                ok = 1;
+                for (int i = 0; i < 16; i++) { /* слово 0: значение
+                                                 * выровнено ВПРАВО (ABI) */
+                    int digit = (int)((out >> ((15 - i) * 4)) & 0xf);
+                    result[2 + 48 + i] = "0123456789abcdef"[digit];
+                }
             }
         }
         char resp[512];
         int n;
+        if (getenv("TB_MOCK_DEBUG") && ok)
+            fprintf(stderr, "[mock] resp len=%zu result=[%s]\n", strlen(result), result);
         if (ok)
             n = snprintf(resp, sizeof(resp),
                          "HTTP/1.1 200 OK\r\nContent-Type: "
@@ -264,7 +417,7 @@ static void stop_task(tb_loop_t *loop, tb_task_t *task, void *arg)
  * оболочка/навигация/автообновление — в webui). Список поднятых
  * страниц управляется конфигом: web.pages. ---- */
 
-#define WEBUI_MARKET_JSON_MAX (8 * 1024)
+#define WEBUI_MARKET_JSON_MAX (16 * 1024)
 
 static const char DASH_JS[] =
     "document.getElementById('page').innerHTML="
@@ -310,9 +463,18 @@ static const char VENUES_JS[] =
     "if(!changed('venues',key))return;"
     "document.getElementById('mode').textContent='биржи и цены · '+"
     "((m.venues||[]).length)+' бирж · проба '+eth(m.probe_wei)+' ETH';"
-    "let h='<h2>Пары по выгодности (сверху лучшие)</h2>"
+    "let h='';"
+    "if(m.quote){"
+    "const neg=String(m.quote.profit_wei||'').startsWith('-');"
+    "h+='<div class=\"cards\"><div class=\"card'+(neg?' bad':' good')+'\">"
+    "<b>'+eth(String(m.quote.profit_wei||'').replace(/^-/,''))+'</b>"
+    "<span>реальная котировка '+esc(m.quote.symbol||'')+' · '+esc(m.quote.buy)"
+    "+' → '+esc(m.quote.sell)+' · вход '+eth(m.quote.in_wei)+' ETH</span></div>"
+    "<div class=\"card\"><b>'+bp(m.quote.spread_bp)+'</b>"
+    "<span>оценка спреда той же пары</span></div></div>';}"
+    "h+='<h2>Пары по выгодности (сверху лучшие)</h2>"
     "<table><thead><tr><th>токен</th><th>покупка</th><th>продажа</th>"
-    "<th>спред</th><th>профит/пробу ETH</th></tr></thead><tbody>';"
+    "<th>спред</th><th>≈ спред-оценка ETH</th></tr></thead><tbody>';"
     "h+=(m.pairs||[]).map(p=>'<tr><td>'+tokLogo(p.token)"
     "+'<a class=\"dex\" title=\"'+p.token+'\" "
     "href=\"https://etherscan.io/token/'+p.token"
@@ -320,19 +482,20 @@ static const char VENUES_JS[] =
     "short(p.token))+'</a></td><td>'"
     "+dexCell(p.buy)+'</td><td>'+dexCell(p.sell)+'</td>'"
     "+'<td style=\"color:'+(p.spread_bp>0?'#5dd39e':'#7b8494')+'\">'"
-    "+bp(p.spread_bp)+'</td><td>'+eth(p.profit_wei)+'</td></tr>').join('');"
+    "+bp(p.spread_bp)+'</td><td>'+eth(p.profit_est)+'</td></tr>').join('');"
     "if(!(m.pairs||[]).length)"
-    "h+='<tr><td colspan=\"5\" class=\"mut\">нет пар с положительным "
+    "h+='<tr><td colspan=\"5\" class=\"mut\">нет свежих пар с положительным "
     "спредом</td></tr>';"
     "h+='</tbody></table>';"
     "h+='<h2>Пулы под наблюдением</h2>"
     "<table><thead><tr><th>биржа</th><th>пул</th><th>fee</th>"
-    "<th>TOKEN за пробу</th><th>круг туда-обратно</th><th>свежесть</th>"
-    "</tr></thead><tbody>';"
+    "<th>TOKEN за пробу</th><th>круг туда-обратно</th><th>блок</th>"
+    "<th>свежесть</th></tr></thead><tbody>';"
     "h+=(m.venues||[]).flatMap(v=>(v.pools||[]).map(pl=>'<tr><td>'"
     "+dexCell(v.name)+'</td><td title=\"'+esc(pl.pool)+'\">'+short(pl.pool)"
     "+'</td><td>'+esc(pl.fee)+'</td><td class=\"mut\">'+short(pl.buy_out)"
-    "+'</td><td>'+bp(pl.round_bp-10000)+'</td><td>'+(pl.fresh?'свежая':"
+    "+'</td><td>'+bp(pl.round_bp-10000)+'</td><td class=\"mut\">'"
+    "+(pl.block||'—')+'</td><td>'+(pl.fresh?'свежая':"
     "'<span class=\"tag t-err\">устарела</span>')+'</td></tr>')).join('');"
     "h+='</tbody></table>';"
     "document.getElementById('page').innerHTML=h;"
@@ -372,166 +535,6 @@ static const tb_web_page_t WEB_PAGES[] = {
     {"venues", "/venues", "Биржи и цены", VENUES_JS},
     {"trades", "/trades", "Сделки", TRADES_JS},
 };
-
-/* Символ ходовых токенов mainnet: hex-адреса в таблицах не читаемы. */
-static const char *token_symbol(const tb_addr_t *a)
-{
-    static const struct { const char *hex, *sym; } map[] = {
-        {"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", "WETH"},
-        {"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC"},
-        {"0xdac17f958d2ee523a2206206994597c13d831ec7", "USDT"},
-        {"0x6b175474e89094c44da98b954eedeac495271d0f", "DAI"},
-        {"0x2260fac5e5542a773aa44fbcfedf7c193bc2c599", "WBTC"},
-        {"0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce", "SHIB"},
-        {"0x6982508145454ce325ddbe47a25d4ec3d2311933", "PEPE"},
-    };
-    char hex[43];
-    tb_addr_to_hex(a, hex, sizeof(hex));
-    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
-        if (strcasecmp(hex, map[i].hex) == 0)
-            return map[i].sym;
-    return NULL; /* неизвестен — покажем короткий адрес */
-}
-
-/* Снимок рынка для страницы «Биржи и цены»: последние котировки пулов
- * + спреды пар (та же арифметика б.п., что в фильтрах; сортировка по
- * выгоде — сверху лучшие). Данные — из tb_arb (единый источник). */
-/* Безопасное добавление в буфер: snprintf возвращает желаемую длину —
- * слепое o += уходит за cap и портит стек; зажимаем и ставим NUL. */
-#define MK_APPEND(...) do {                                            \
-        if (o + 1 < cap) {                                             \
-            int _n = snprintf(out + o, cap - o, __VA_ARGS__);          \
-            if (_n > 0)                                                \
-                o += (size_t)_n;                                       \
-        }                                                              \
-        if (o + 1 >= cap) {                                            \
-            o = cap - 1;                                               \
-            out[o] = '\\0';                                           \
-        }                                                              \
-    } while (0)
-
-static void web_build_market(app_t *d, char *out, size_t cap)
-{
-    const tb_arb_t *a = d->arb;
-    size_t n = tb_arb_pools_n(a);
-    uint64_t now = tb_now_ms();
-    uint64_t probe = tb_arb_probe_wei(a);
-
-    uint32_t fmax = d->cfg->freshness_max_ms;
-    if (!fmax)
-        fmax = d->cfg->poll_ms ? 3 * (uint32_t)d->cfg->poll_ms : 24000;
-
-    char probe_s[80];
-    tb_u256_t pv = tb_u256_from_u64(probe);
-    tb_u256_to_dec(&pv, probe_s, sizeof(probe_s));
-
-    struct pair_ent {
-        uint32_t bi, si;
-        uint32_t bp;
-        uint64_t prof;
-    };
-    struct pair_ent pairs[TB_ARB_MAX_POOLS * TB_ARB_MAX_POOLS];
-    size_t pairs_n = 0;
-
-    size_t o = 0;
-    MK_APPEND("{\"probe_wei\":\"%s\",\"venues\":[", probe_s);
-
-    char venues[TB_DEX_MAX_VENUES][TB_DEX_NAME_MAX];
-    size_t venues_n = 0;
-    for (size_t i = 0; i < n; i++) {
-        const tb_arb_snap_t *s = tb_arb_last_snap(a, i);
-        if (!s)
-            continue;
-        size_t k = 0;
-        for (; k < venues_n; k++)
-            if (strcmp(venues[k], s->dex) == 0)
-                break;
-        if (k == venues_n && venues_n < TB_DEX_MAX_VENUES) {
-            snprintf(venues[venues_n], sizeof(venues[0]), "%s", s->dex);
-            venues_n++;
-        }
-    }
-
-    for (size_t k = 0; k < venues_n; k++) {
-        MK_APPEND("%s{\"name\":\"%s\",\"pools\":[",
-                  k ? "," : "", venues[k]);
-        int wrote = 0;
-        for (size_t i = 0; i < n; i++) {
-            const tb_arb_pool_t *p = tb_arb_pool(a, i);
-            const tb_arb_snap_t *s = tb_arb_last_snap(a, i);
-            if (!p || !s || strcmp(s->dex, venues[k]) != 0)
-                continue;
-            char pool_s[43], tok_s[43], buy_s[80];
-            tb_addr_to_hex(&p->pool, pool_s, sizeof(pool_s));
-            tb_addr_to_hex(&p->token, tok_s, sizeof(tok_s));
-            tb_u256_to_dec(&s->buy_out, buy_s, sizeof(buy_s));
-            uint32_t round_bp = 0;
-            if (!tb_arb_ratio_bp(&s->sell_back, &pv, &round_bp))
-                round_bp = 0;
-            MK_APPEND("%s{\"pool\":\"%s\",\"token\":\"%s\","
-                      "\"fee\":\"%u.%04u%%\",\"buy_out\":\"%s\","
-                      "\"round_bp\":%u,\"ts_ms\":%llu,\"fresh\":%s}",
-                      wrote++ ? "," : "", pool_s, tok_s,
-                      p->fee / 10000, p->fee % 10000, buy_s, round_bp,
-                      (unsigned long long)s->ts_ms,
-                      (now - s->ts_ms <= fmax) ? "true" : "false");
-        }
-        MK_APPEND("]}");
-    }
-
-    for (size_t i = 0; i < n
-         && pairs_n < TB_ARB_MAX_POOLS * TB_ARB_MAX_POOLS; i++) {
-        const tb_arb_snap_t *si = tb_arb_last_snap(a, i);
-        if (!si || !si->complete)
-            continue;
-        for (size_t j = 0; j < n; j++) {
-            if (i == j)
-                continue;
-            const tb_arb_snap_t *sj = tb_arb_last_snap(a, j);
-            if (!sj || !sj->complete || !tb_addr_eq(&si->token, &sj->token))
-                continue;
-            uint32_t r = 0;
-            if (!tb_arb_ratio_bp(&si->buy_out, &sj->buy_out, &r)
-                || r <= 10000)
-                continue;
-            struct pair_ent e = {
-                .bi = (uint32_t)i,
-                .si = (uint32_t)j,
-                .bp = r - 10000,
-                .prof = probe / 10000 * (uint64_t)(r - 10000),
-            };
-            size_t k = pairs_n++;
-            for (; k > 0 && pairs[k - 1].bp < e.bp; k--)
-                pairs[k] = pairs[k - 1];
-            pairs[k] = e;
-        }
-    }
-
-    MK_APPEND("],\"pairs\":[");
-    for (size_t k = 0; k < pairs_n; k++) {
-        const tb_arb_pool_t *bpl = tb_arb_pool(a, pairs[k].bi);
-        const tb_arb_pool_t *spl = tb_arb_pool(a, pairs[k].si);
-        const tb_arb_snap_t *bs = tb_arb_last_snap(a, pairs[k].bi);
-        const tb_arb_snap_t *ss = tb_arb_last_snap(a, pairs[k].si);
-        if (!bpl || !spl || !bs || !ss)
-            continue;
-        char tok_s[43], prof_s[80];
-        tb_addr_to_hex(&bpl->token, tok_s, sizeof(tok_s));
-        const char *sym = token_symbol(&bpl->token);
-        tb_u256_t pw = tb_u256_from_u64(pairs[k].prof);
-        tb_u256_to_dec(&pw, prof_s, sizeof(prof_s));
-        MK_APPEND("%s{\"token\":\"%s\",\"symbol\":\"%s\","
-                  "\"buy\":\"%s %u.%04u%%\","
-                  "\"sell\":\"%s %u.%04u%%\",\"spread_bp\":%u,"
-                  "\"profit_wei\":\"%s\"}",
-                  k ? "," : "", tok_s, sym ? sym : "", bs->dex,
-                  bpl->fee / 10000, bpl->fee % 10000, ss->dex,
-                  spl->fee / 10000, spl->fee % 10000, pairs[k].bp, prof_s);
-    }
-    MK_APPEND("]}");
-    if (o < cap)
-        out[o] = '\0';
-}
 
 static void web_update_task(tb_loop_t *loop, tb_task_t *task, void *arg)
 {
@@ -586,9 +589,13 @@ static void web_update_task(tb_loop_t *loop, tb_task_t *task, void *arg)
              profit ? "good" : "bad");
     tb_webui_set_named(d->web, "status", json);
 
-    /* рынок для страницы «Биржи и цены» (тот же источник: tb_arb) */
+    /* рынок для страницы «Биржи и цены» (тот же источник: tb_arb;
+     * сборка — чистая функция в tb_user, ворота свежести/блока — там) */
     char market[WEBUI_MARKET_JSON_MAX];
-    web_build_market(d, market, sizeof(market));
+    size_t snaps_n = 0;
+    const tb_arb_snap_t *snaps = tb_arb_last_snaps(d->arb, &snaps_n);
+    tb_arb_market_json(d->cfg, snaps, snaps_n, tb_now_ms(),
+                       tb_arb_route_quote(d->arb), market, sizeof(market));
     tb_webui_set_named(d->web, "market", market);
 }
 
@@ -692,6 +699,12 @@ int main(int argc, char **argv)
     }
     tb_arb_defaults(&cfg); /* в т.ч. web-страницы/порт/период */
 
+    /* В2: целостность конфига — до сети и до движка (fail-fast) */
+    if (tb_arb_cfg_validate(&cfg, &err) != 0) {
+        fprintf(stderr, "конфиг '%s': %s\n", cfg_path, err.message);
+        return 1;
+    }
+
     /* ---- режим исполнения: конфиг network.live_exec или флаг ---- */
     if (cfg.dex.live)
         live_exec = true;
@@ -747,11 +760,14 @@ int main(int argc, char **argv)
     app.replay = replay;
 
     if (replay) {
-        /* офлайн: локальный mock-RPC + демо-параметры экономии */
+        /* офлайн: локальный mock-RPC + демо-параметры экономии.
+         * ВСЕ venue на mock: рынок синтетический, включая V2
+         * (getAmountsOut) — межбиржевые маршруты гоняются офлайн. */
         mock_start(&app.mock);
-        snprintf(cfg.dex.venues[0].rpc_url,
-                 sizeof(cfg.dex.venues[0].rpc_url),
-                 "http://127.0.0.1:%u", (unsigned)app.mock.port);
+        for (uint32_t v = 0; v < cfg.dex.venues_n; v++)
+            snprintf(cfg.dex.venues[v].rpc_url,
+                     sizeof(cfg.dex.venues[v].rpc_url),
+                     "http://127.0.0.1:%u", (unsigned)app.mock.port);
         cfg.poll_ms = 1200;
         cfg.probe_wei = 100000000000000ull;
         cfg.min_trade_wei = 100000000000000ull;
@@ -770,6 +786,55 @@ int main(int argc, char **argv)
     if (!http) {
         fprintf(stderr, "транспорт: %s\n", err.message);
         return 1;
+    }
+
+    /* ---- веб-морда: поднимаем ДО медленных стартерных eth_call —
+     * страница отвечает сразу («котировок ещё нет»), данные подтянутся
+     * первым решённым батчем; bind из конфига (web.bind) ---- */
+    if (web_port == 0)
+        web_port = cfg.web.port; /* не задано флагом — берём из конфига */
+    if (web_port > 0) {
+        tb_error_t werr = TB_ERROR_INIT;
+        if (tb_webui_start(&app.web, (uint16_t)web_port, cfg.web.bind,
+                           ledger_path, &werr) != 0) {
+            fprintf(stderr, "веб-морда: %s (продолжаем без неё)\n",
+                    werr.message);
+        } else {
+            for (uint32_t k = 0; k < cfg.web.pages_n; k++) {
+                bool known = false;
+                for (size_t q = 0;
+                     q < sizeof(WEB_PAGES) / sizeof(WEB_PAGES[0]); q++)
+                    if (strcmp(WEB_PAGES[q].id, cfg.web.pages[k]) == 0) {
+                        tb_webui_page_add(app.web, &WEB_PAGES[q]);
+                        known = true;
+                        break;
+                    }
+                if (!known)
+                    fprintf(stderr, "веб-морда: неизвестная страница '%s'\n",
+                            cfg.web.pages[k]);
+            }
+            printf("веб-морда: http://%s:%u%s\n", cfg.web.bind,
+                   (unsigned)tb_webui_port(app.web),
+                   strcmp(cfg.web.bind, "127.0.0.1") == 0
+                       ? ""
+                       : " (доступна с других машин)");
+            fflush(stdout);
+        }
+    }
+
+    /* В4: идентичность пулов на цепи — каждый пул обязан совпасть с
+     * Factory.getPool/getPair своей биржи (replay — синтетика, мимо) */
+    if (!replay) {
+        printf("старт: проверка %u пулов на цепи (getPool/getPair)…\n",
+               cfg.pools_n);
+        fflush(stdout);
+        if (tb_arb_cfg_verify(&cfg, http, &err) != 0) {
+            fprintf(stderr, "проверка на цепи: %s\n", err.message);
+            if (app.web)
+                tb_webui_stop(app.web);
+            tb_http_destroy(http);
+            return 1;
+        }
     }
 
     /* ---- бэкенд исполнения (движок); котировщик — свой внутри tb_arb ---- */
@@ -843,7 +908,10 @@ int main(int argc, char **argv)
     tb_wallet_deposit(wallet, &cfg.weth, &start, &err);
 
     /* ---- цикл + мост BLOCKED->таймер ---- */
-    app.loop = tb_loop_create(2, &err);
+    /* 4 воркера: батч 17+ пулов × 3 котировки, каждая — своё TLS-рукопожатие
+     * (транспорт без keep-alive); при 2 воркерах батч ~20 с и снапшоты
+     * перестают проходить собственный фильтр свежести */
+    app.loop = tb_loop_create(4, &err);
     if (!app.loop) {
         fprintf(stderr, "цикл: %s\n", err.message);
         return 1;
@@ -852,6 +920,10 @@ int main(int argc, char **argv)
     tb_evreg_on_state(app.reg, 1u << TB_EV_BLOCKED, bridge_observer, &app);
 
     /* ---- конвейер арбитража ---- */
+    if (!replay) {
+        printf("старт: symbol/decimals токенов с цепи…\n");
+        fflush(stdout);
+    }
     tb_arb_t *arb = tb_arb_create(&cfg, engine, ledger, http, &err);
     if (!arb) {
         fprintf(stderr, "arb: %s\n", err.message);
@@ -862,43 +934,18 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* ---- веб-морда: страницы-микромодули (127.0.0.1) ---- */
+    /* ---- обновление страниц морды: конвейер жив, данные пойдут ---- */
     app.arb = arb;
     app.engine = engine;
     app.cfg = &cfg;
     app.start_weth = start;
     app.started_ms = tb_now_ms();
-    if (web_port == 0)
-        web_port = cfg.web.port; /* не задано флагом — берём из конфига */
-    if (web_port > 0) {
-        tb_error_t werr = TB_ERROR_INIT;
-        if (tb_webui_start(&app.web, (uint16_t)web_port, ledger_path,
-                           &werr) != 0) {
-            fprintf(stderr, "веб-морда: %s (продолжаем без неё)\n",
-                    werr.message);
-        } else {
-            /* какие страницы подняты — решает конфиг (web.pages) */
-            for (uint32_t k = 0; k < cfg.web.pages_n; k++) {
-                bool known = false;
-                for (size_t q = 0;
-                     q < sizeof(WEB_PAGES) / sizeof(WEB_PAGES[0]); q++)
-                    if (strcmp(WEB_PAGES[q].id, cfg.web.pages[k]) == 0) {
-                        tb_webui_page_add(app.web, &WEB_PAGES[q]);
-                        known = true;
-                        break;
-                    }
-                if (!known)
-                    fprintf(stderr, "веб-морда: неизвестная страница '%s'\n",
-                            cfg.web.pages[k]);
-            }
-            if (!cfg.web.refresh_ms)
-                cfg.web.refresh_ms = 2000;
-            printf("веб-морда: http://127.0.0.1:%u\n",
-                   (unsigned)tb_webui_port(app.web));
-            tb_loop_call_every(app.loop, cfg.web.refresh_ms, TB_PRIO_LOW,
-                               "web.update", web_update_task, &app, NULL);
-            web_update_task(app.loop, NULL, &app);
-        }
+    if (app.web) {
+        if (!cfg.web.refresh_ms)
+            cfg.web.refresh_ms = 2000;
+        tb_loop_call_every(app.loop, cfg.web.refresh_ms, TB_PRIO_LOW,
+                           "web.update", web_update_task, &app, NULL);
+        web_update_task(app.loop, NULL, &app);
     }
 
     {
@@ -961,9 +1008,11 @@ int main(int argc, char **argv)
     printf("Отмены: %llu, потерянный газ: %llu wei\n",
            (unsigned long long)as->orders_canceled,
            (unsigned long long)as->cancel_fee_wei);
+    /* статистика цитировщика пишется воркерами атомарно — читаем так же:
+     * цикл уже остановлен, но последний воркер ещё может довести RPC */
     printf("RPC: quote-вызовы %llu, exec-вызовы %llu\n",
-           (unsigned long long)dq->rpc_calls,
-           (unsigned long long)ds->rpc_calls);
+           (unsigned long long)tb_atomic_load_u64(&dq->rpc_calls),
+           (unsigned long long)tb_atomic_load_u64(&ds->rpc_calls));
     printf("Кошелёк WETH: %s (старт %s)\n", bal_s, start_s);
     printf(have ? "Виртуальный PnL: %s ETH\n"
                 : "Виртуальный PnL: −%s ETH (баланс ниже старта)\n",
@@ -975,7 +1024,9 @@ int main(int argc, char **argv)
      * (краш в venue_by_pool). Дальше — то, чем пользовались воркеры. */
     tb_loop_destroy(app.loop);
     tb_arb_destroy(arb);
-    tb_exec_destroy(engine);
+    tb_exec_destroy(engine); /* заимствованный dex-бэкенд — наш */
+    if (dexb_exec.destroy)
+        dexb_exec.destroy(&dexb_exec);
     tb_ledger_close(ledger);
     tb_http_destroy(http);
     if (replay)

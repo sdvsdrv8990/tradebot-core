@@ -1,13 +1,16 @@
 /* ==========================================================================
  *  tests/test_backend_dex.c — DEX-адаптер на replay-транспорте:
  *  арифметика многохоповых котировок, ABI-calldata, маппинг ошибок RPC,
- *  shadow-сессии submit/poll, ёмкость, slippage.
+ *  shadow-сессии submit/poll, ёмкость, slippage; проверка пулов на цепи
+ *  (В4: getPool), symbol/decimals (В5), eth_blockNumber (В6), маршрут
+ *  через две биржи (В8).
  * ========================================================================== */
 #include <stdio.h>
 #include <string.h>
 
 #include "harness.h"
 #include "tb/core/error.h"
+#include "tb/core/keccak.h"
 #include "tb/core/time.h"
 #include "tb/exec/backend_dex.h"
 #include "tb/net/http.h"
@@ -289,12 +292,389 @@ static void test_capacity(void)
     tb_http_destroy(http);
 }
 
+/* ---- В4/В5/В6/В8: стартерные вызовы и межбиржевые маршруты ---- */
+
+static const char *addr_word(const tb_addr_t *a)
+{
+    /* слово с адресом, выровненным вправо */
+    static char buf[69];
+    char hex[43];
+    tb_addr_to_hex(a, hex, sizeof(hex));
+    snprintf(buf, sizeof(buf), "0x000000000000000000000000%s", hex + 2);
+    return buf;
+}
+
+/* ABI-строка: offset 0x20 + len + данные, выровненные в слово */
+static const char *abi_string(const char *s)
+{
+    static char buf[200];
+    size_t n = strlen(s);
+    buf[0] = '\0';
+    strcat(buf, "0x");
+    for (int i = 0; i < 62; i++)
+        strcat(buf, "0");
+    strcat(buf, "20");
+    char lenw[65];
+    snprintf(lenw, sizeof(lenw), "%064zx", n);
+    strcat(buf, lenw);
+    char data[65];
+    size_t o = 0;
+    for (size_t i = 0; i < 32; i++) {
+        if (i < n)
+            o += (size_t)snprintf(data + o, sizeof(data) - o, "%02x",
+                                  (unsigned char)s[i]);
+        else
+            o += (size_t)snprintf(data + o, sizeof(data) - o, "00");
+    }
+    strcat(buf, data);
+    return buf;
+}
+
+/* Селекторы сверены keccak на месте (как 0xc6a5026a для Quoter). */
+static void test_selectors_on_site(void)
+{
+    uint8_t sel[4];
+    tb_keccak_selector("quoteExactInputSingle((address,address,uint256,"
+                       "uint24,uint160))",
+                       sel);
+    CHECK(sel[0] == 0xc6 && sel[1] == 0xa5 && sel[2] == 0x02
+          && sel[3] == 0x6a);
+    tb_keccak_selector("getPool(address,address,uint24)", sel);
+    CHECK(sel[0] == 0x16 && sel[1] == 0x98 && sel[2] == 0xee
+          && sel[3] == 0x82);
+    tb_keccak_selector("getPair(address,address)", sel);
+    CHECK(sel[0] == 0xe6 && sel[1] == 0xa4 && sel[2] == 0x39
+          && sel[3] == 0x05);
+    tb_keccak_selector("getAmountsOut(uint256,address[])", sel);
+    CHECK(sel[0] == 0xd0 && sel[1] == 0x6c && sel[2] == 0xa6
+          && sel[3] == 0x1f);
+}
+
+/* Ответ Router.getAmountsOut: uint[2] = [вход, выход]. */
+static const char *rpc_amounts(uint64_t in, uint64_t out)
+{
+    static char buf[340];
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x"
+             "%064x%064x%064llx%064llx\"}",
+             0x20, 2, (unsigned long long)in, (unsigned long long)out);
+    return buf;
+}
+
+/* V2-биржа: котировка через Router.getAmountsOut, разбор массива. */
+static void test_v2_quote(void)
+{
+    tb_error_t err = TB_ERROR_INIT;
+    tb_exec_dex_cfg_t cfg;
+    mk_cfg(&cfg);
+    cfg.venues[0].kind = TB_DEX_V2;
+    cfg.venues[0].router = QUOTER; /* роли адреса для теста не важны */
+
+    tb_u256_t q = dec("227435");
+    tb_http_replay_step_t steps[] = {
+        { .status = 200, .body = rpc_amounts(100000000000000ull, 227435) },
+    };
+    tb_http_t *http = tb_http_replay_create(steps, 1, &err);
+    tb_exec_backend_t b;
+    CHECK(tb_exec_dex_init(&b, http, &cfg, &err) == 0);
+
+    tb_route_t r = tb_route_single(&WETH, &USDC, 3000, &err);
+    tb_route_set_pool(&r, 0, &POOL_A);
+    tb_u256_t out, in0 = dec("100000000000000");
+    CHECK(b.quote(&b, &r, &in0, tb_now_ms(), &out, &err) == 0);
+    CHECK(tb_u256_cmp(&out, &q) == 0); /* выход = последний элемент */
+    b.destroy(&b);
+    tb_http_destroy(http);
+
+    /* ответ не массив — ошибка BACKEND с атрибуцией метода */
+    tb_http_replay_step_t bad[] = {
+        { .status = 200, .body = rpc_ok(dec("123")) },
+    };
+    http = tb_http_replay_create(bad, 1, &err);
+    CHECK(tb_exec_dex_init(&b, http, &cfg, &err) == 0);
+    tb_error_t e2 = TB_ERROR_INIT;
+    CHECK(b.quote(&b, &r, &in0, tb_now_ms(), &out, &e2) != 0);
+    CHECK(e2.code == TB_EXEC_BACKEND);
+    CHECK(strstr(e2.message, "getAmountsOut") != NULL);
+    b.destroy(&b);
+    tb_http_destroy(http);
+
+    /* init fail-fast: V2 без router */
+    tb_exec_dex_cfg_t cfg2;
+    mk_cfg(&cfg2);
+    cfg2.venues[0].kind = TB_DEX_V2;
+    memset(&cfg2.venues[0].router, 0, sizeof(tb_addr_t));
+    tb_exec_backend_t b2;
+    tb_error_t e3 = TB_ERROR_INIT;
+    tb_http_replay_step_t none[] = { { .status = 200, .body = "{}" } };
+    tb_http_t *h3 = tb_http_replay_create(none, 1, &err);
+    CHECK(tb_exec_dex_init(&b2, h3, &cfg2, &e3) != 0);
+    CHECK(strstr(e3.message, "router") != NULL);
+    tb_http_destroy(h3);
+
+    /* init fail-fast: V3 без quoter */
+    tb_exec_dex_cfg_t cfg3;
+    mk_cfg(&cfg3);
+    memset(&cfg3.venues[0].quoter, 0, sizeof(tb_addr_t));
+    tb_exec_backend_t b3;
+    tb_error_t e4 = TB_ERROR_INIT;
+    tb_http_t *h4 = tb_http_replay_create(none, 1, &err);
+    CHECK(tb_exec_dex_init(&b3, h4, &cfg3, &e4) != 0);
+    CHECK(strstr(e4.message, "quoter") != NULL);
+    tb_http_destroy(h4);
+}
+
+/* V2-биржа: проверка пары на цепи через Factory.getPair. */
+static void test_verify_pair_v2(void)
+{
+    tb_error_t err = TB_ERROR_INIT;
+    tb_exec_dex_venue_t v;
+    memset(&v, 0, sizeof(v));
+    strcpy(v.name, "sushi-test");
+    strcpy(v.rpc_url, "https://rpc.test/x");
+    v.kind = TB_DEX_V2;
+    v.router = QUOTER;
+    v.factory = A("0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac");
+
+    char body[192];
+    snprintf(body, sizeof(body),
+             "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"%s\"}",
+             addr_word(&POOL_A));
+    tb_http_replay_step_t steps[] = { { .status = 200, .body = body } };
+    tb_http_t *http = tb_http_replay_create(steps, 1, &err);
+    CHECK(tb_exec_dex_verify_pool(http, &v, &WETH, &USDC, 3000, &POOL_A,
+                                  &err) == 0);
+    tb_http_destroy(http);
+
+    snprintf(body, sizeof(body),
+             "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"%s\"}",
+             addr_word(&POOL_B));
+    tb_http_replay_step_t steps2[] = { { .status = 200, .body = body } };
+    http = tb_http_replay_create(steps2, 1, &err);
+    CHECK(tb_exec_dex_verify_pool(http, &v, &WETH, &USDC, 3000, &POOL_A,
+                                  &err) != 0);
+    CHECK(strstr(err.message, "getPair") != NULL);
+    CHECK(strstr(err.message, "фабрика") != NULL);
+    tb_http_destroy(http);
+}
+
+/* Смешанный маршрут: хоп0 — V3 (QuoterV2), хоп1 — V2 (getAmountsOut). */
+static void test_mixed_v3_v2_route(void)
+{
+    tb_error_t err = TB_ERROR_INIT;
+    tb_exec_dex_cfg_t cfg;
+    mk_cfg(&cfg);
+
+    strcpy(cfg.venues[1].name, "sushi-test");
+    strcpy(cfg.venues[1].rpc_url, "https://rpc.test/y");
+    cfg.venues[1].kind = TB_DEX_V2;
+    cfg.venues[1].router = QUOTER;
+    cfg.venues[1].pools[0] = POOL_B;
+    cfg.venues[1].pools_n = 1;
+    cfg.venues[0].pools_n = 1;
+    cfg.venues_n = 2;
+
+    tb_u256_t q1 = dec("2253600"), q2 = dec("1001234567890123");
+    tb_http_replay_step_t steps[] = {
+        { .status = 200, .body = rpc_ok(q1) }, /* uni V3: WETH -> USDC */
+        { .status = 200, .body = rpc_amounts(2253600, 1001234567890123ull) },
+    };
+    tb_http_t *http = tb_http_replay_create(steps, 2, &err);
+    tb_exec_backend_t b;
+    CHECK(tb_exec_dex_init(&b, http, &cfg, &err) == 0);
+
+    tb_addr_t toks[3] = { WETH, USDC, WETH };
+    uint32_t fees[2] = { 3000, 3000 };
+    tb_route_t r = tb_route_encode(toks, fees, 3, &err);
+    tb_route_set_pool(&r, 0, &POOL_A);
+    tb_route_set_pool(&r, 1, &POOL_B);
+
+    tb_u256_t out, in0 = dec("1000000000000000");
+    CHECK(b.quote(&b, &r, &in0, tb_now_ms(), &out, &err) == 0);
+    CHECK(tb_u256_cmp(&out, &q2) == 0);
+
+    const tb_exec_dex_stats_t *st = tb_exec_dex_stats(&b);
+    CHECK(st->quotes == 1 && st->rpc_calls == 2);
+
+    b.destroy(&b);
+    tb_http_destroy(http);
+}
+
+static void test_verify_pool(void)
+{
+    tb_error_t err = TB_ERROR_INIT;
+    tb_exec_dex_venue_t v;
+    memset(&v, 0, sizeof(v));
+    strcpy(v.name, "uni-test");
+    strcpy(v.rpc_url, "https://rpc.test/x");
+    v.quoter = QUOTER;
+    v.factory = A("0x1F98431c8AD9852364AE8ddf06475563B9961697");
+
+    /* 1) фабрика вернула тот же адрес — ок */
+    {
+        char body[192];
+        snprintf(body, sizeof(body),
+                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"%s\"}",
+                 addr_word(&POOL_A));
+        tb_http_replay_step_t steps[] = { { .status = 200, .body = body } };
+        tb_http_t *http = tb_http_replay_create(steps, 1, &err);
+        CHECK(http != NULL);
+        CHECK(tb_exec_dex_verify_pool(http, &v, &WETH, &USDC, 500, &POOL_A,
+                                      &err) == 0);
+        tb_http_destroy(http);
+    }
+
+    /* 2) фабрика вернула ДРУГОЙ адрес — отказ с атрибуцией */
+    {
+        char body[192];
+        snprintf(body, sizeof(body),
+                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"%s\"}",
+                 addr_word(&POOL_B));
+        tb_http_replay_step_t steps[] = { { .status = 200, .body = body } };
+        tb_http_t *http = tb_http_replay_create(steps, 1, &err);
+        CHECK(tb_exec_dex_verify_pool(http, &v, &WETH, &USDC, 500, &POOL_A,
+                                      &err) != 0);
+        CHECK(err.domain == TB_DOMAIN_USER
+              && err.code == TB_EXEC_BACKEND);
+        CHECK(strstr(err.message, "фабрика") != NULL);
+        tb_http_destroy(http);
+    }
+
+    /* 3) пула нет (0x) — отказ: пара/fee не совпадают с цепью */
+    {
+        tb_http_replay_step_t steps[] = {
+            { .status = 200, .body = "{\"result\":\"0x\"}" }
+        };
+        tb_http_t *http = tb_http_replay_create(steps, 1, &err);
+        CHECK(tb_exec_dex_verify_pool(http, &v, &WETH, &USDC, 500, &POOL_A,
+                                      &err) != 0);
+        CHECK(strstr(err.message, "пула") != NULL);
+        tb_http_destroy(http);
+    }
+
+    /* 4) фабрика нулевая (venue не V3-типа) — проверка пропускается */
+    memset(&v.factory, 0, sizeof(v.factory));
+    CHECK(tb_exec_dex_verify_pool(NULL, &v, &WETH, &USDC, 500, &POOL_A,
+                                  &err) == 0);
+}
+
+static void test_block_number(void)
+{
+    tb_error_t err = TB_ERROR_INIT;
+    tb_exec_dex_cfg_t cfg;
+    mk_cfg(&cfg);
+    tb_http_replay_step_t steps[] = {
+        { .status = 200, .body = "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                 "\"result\":\"0x1234abcd\"}" }
+    };
+    tb_http_t *http = tb_http_replay_create(steps, 1, &err);
+    uint64_t block = 0;
+    CHECK(tb_exec_dex_block_number(http, &cfg.venues[0], &block, &err) == 0);
+    CHECK(block == 0x1234abcd);
+    tb_http_destroy(http);
+}
+
+static void test_token_info(void)
+{
+    tb_error_t err = TB_ERROR_INIT;
+    tb_exec_dex_cfg_t cfg;
+    mk_cfg(&cfg);
+
+    /* symbol() -> строка ABI "USDC", decimals() -> 6 */
+    char sym_body[320];
+    snprintf(sym_body, sizeof(sym_body),
+             "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"%s\"}",
+             abi_string("USDC"));
+    tb_http_replay_step_t steps[] = {
+        { .status = 200, .body = sym_body },
+        { .status = 200, .body = "{\"result\":\"0x6\"}" },
+    };
+    tb_http_t *http = tb_http_replay_create(steps, 2, &err);
+
+    char symbol[16];
+    uint8_t decimals = 0;
+    CHECK(tb_exec_dex_token_info(http, &cfg.venues[0], &USDC, symbol,
+                                 sizeof(symbol), &decimals,
+                                 &err) == 0);
+    CHECK_STR_EQ(symbol, "USDC");
+    CHECK(decimals == 6);
+    tb_http_destroy(http);
+
+    /* старые токены: symbol как bytes32 */
+    char b32[200];
+    snprintf(b32, sizeof(b32),
+             "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x"
+             "554e4956320000000000000000000000000000000000000000000000000000"
+             "00"
+             "\"}");
+    tb_http_replay_step_t steps2[] = {
+        { .status = 200, .body = b32 },
+        { .status = 200, .body = "{\"result\":\"0x12\"}" }, /* 18 */
+    };
+    http = tb_http_replay_create(steps2, 2, &err);
+    CHECK(tb_exec_dex_token_info(http, &cfg.venues[0], &USDC, symbol,
+                                 sizeof(symbol), &decimals, &err) == 0);
+    CHECK_STR_EQ(symbol, "UNIV2");
+    CHECK(decimals == 18);
+    tb_http_destroy(http);
+}
+
+/* Две биржи: хоп с пулом POOL_A исполняется на venue 0, POOL_B — на
+ * venue 1, каждый котируется своим quoter'ом (межбиржевой маршрут). */
+static void test_two_venues_route(void)
+{
+    tb_error_t err = TB_ERROR_INIT;
+    tb_exec_dex_cfg_t cfg;
+    mk_cfg(&cfg);
+
+    strcpy(cfg.venues[1].name, "cake-test");
+    strcpy(cfg.venues[1].rpc_url, "https://rpc.test/y");
+    cfg.venues[1].quoter = QUOTER;
+    cfg.venues[1].pools[0] = POOL_B;
+    cfg.venues[1].pools_n = 1;
+    cfg.venues[0].pools_n = 1; /* POOL_B теперь принадлежит только cake */
+    cfg.venues_n = 2;
+
+    tb_u256_t q1 = dec("2253600"), q2 = dec("1001234567890123");
+    tb_http_replay_step_t steps[] = {
+        { .status = 200, .body = rpc_ok(q1) }, /* uni: WETH -> USDC */
+        { .status = 200, .body = rpc_ok(q2) }, /* cake: USDC -> WETH */
+    };
+    tb_http_t *http = tb_http_replay_create(steps, 2, &err);
+    tb_exec_backend_t b;
+    CHECK(tb_exec_dex_init(&b, http, &cfg, &err) == 0);
+
+    tb_addr_t toks[3] = { WETH, USDC, WETH };
+    uint32_t fees[2] = { 3000, 500 };
+    tb_route_t r = tb_route_encode(toks, fees, 3, &err);
+    tb_route_set_pool(&r, 0, &POOL_A);
+    tb_route_set_pool(&r, 1, &POOL_B);
+
+    tb_u256_t out, in0 = dec("1000000000000000");
+    CHECK(b.quote(&b, &r, &in0, tb_now_ms(), &out, &err) == 0);
+    CHECK(tb_u256_cmp(&out, &q2) == 0);
+
+    const tb_exec_dex_stats_t *st = tb_exec_dex_stats(&b);
+    CHECK(st->quotes == 1 && st->rpc_calls == 2);
+
+    b.destroy(&b);
+    tb_http_destroy(http);
+}
+
 int main(void)
 {
     test_quote_multihop();
     test_quote_errors();
     test_submit_poll();
     test_capacity();
+    test_selectors_on_site();
+    test_v2_quote();
+    test_verify_pool();
+    test_verify_pair_v2();
+    test_block_number();
+    test_token_info();
+    test_two_venues_route();
+    test_mixed_v3_v2_route();
     printf("OK test_backend_dex\n");
     return 0;
 }

@@ -5,31 +5,167 @@
       "name": "uniswap-v3",
       "url": "https://ethereum-rpc.publicnode.com",
       "quoter": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-      "pools": [
-        "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
-        "0x8ad599c3A0fF1De082011EFDDc58f1908eb6e6D8",
-        "0x11b815efB8f581194ae79006d24E0d814B7697F6"
-      ]
+      "factory": "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+    },
+    {
+      "name": "pancakeswap-v3",
+      "url": "https://ethereum-rpc.publicnode.com",
+      "quoter": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+      "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"
+    },
+    {
+      "name": "sushiswap-v2",
+      "type": "v2",
+      "url": "https://ethereum-rpc.publicnode.com",
+      "router": "0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F",
+      "factory": "0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac"
+    },
+    {
+      "name": "uniswap-v2",
+      "type": "v2",
+      "url": "https://ethereum-rpc.publicnode.com",
+      "router": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+      "factory": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
     }
   ],
   "pools": [
     {
       "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-      "pool": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+      "pool": "0x88e6A0c2dDD26FeEb64F039a2c41296FcB3f5640",
       "fee": 500,
       "dex": "uniswap-v3"
     },
     {
       "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-      "pool": "0x8ad599c3A0fF1De082011EFDDc58f1908eb6e6D8",
+      "pool": "0x8ad599c3A0ff1DE082011EFDDc58f1908eb6e6D8",
       "fee": 3000,
       "dex": "uniswap-v3"
+    },
+    {
+      "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "pool": "0x1ac1A8FEaAEa1900C4166dEeed0C11cC10669D36",
+      "fee": 500,
+      "dex": "pancakeswap-v3"
     },
     {
       "token": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
       "pool": "0x11b815efB8f581194ae79006d24E0d814B7697F6",
       "fee": 500,
       "dex": "uniswap-v3"
+    },
+    {
+      "token": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+      "pool": "0x6CA298D2983aB03Aa1dA7679389D955A4eFEE15C",
+      "fee": 500,
+      "dex": "pancakeswap-v3"
+    },
+    {
+      "token": "0x6B175474E89094c44Da98b954EedeAC495271d0F",
+      "pool": "0xD8dEC118e1215F02e10DB846DCbBfE27d477aC19",
+      "fee": 100,
+      "dex": "uniswap-v3"
+    },
+    {
+      "token": "0x6B175474E89094c44Da98b954EedeAC495271d0F",
+      "pool": "0x60594a405d53811d3BC4766596EFD80fd545A270",
+      "fee": 500,
+      "dex": "uniswap-v3"
+    },
+    {
+      "token": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+      "pool": "0x4585FE77225b41B697C938B018E2Ac67Ac5a20c0",
+      "fee": 500,
+      "dex": "uniswap-v3"
+    },
+    {
+      "token": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+      "pool": "0x8E0a80f54ed8872fe0609C637D3D4970b86a038a",
+      "fee": 500,
+      "dex": "pancakeswap-v3"
+    },
+    {
+      "token": "0x514910771AF9Ca656af840dff83E8264EcF986CA",
+      "pool": "0x5d4F3C6fA16908609BAC31Ff148Bd002AA6b8c83",
+      "fee": 500,
+      "dex": "uniswap-v3"
+    },
+    {
+      "token": "0x1f9840a85d5aF5Bf1D1762F925BDADdC4201F984",
+      "pool": "0xfaA318479b7755B2dBfDD34dC306cb28B420Ad12",
+      "fee": 500,
+      "dex": "uniswap-v3"
+    },
+    {
+      "token": "0x1f9840a85d5aF5Bf1D1762F925BDADdC4201F984",
+      "pool": "0xCf9E58c85d5bF866B6EFea98252ea43a5BbeA1AF",
+      "fee": 10000,
+      "dex": "pancakeswap-v3"
+    },
+    {
+      "token": "0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE",
+      "pool": "0x2F62f2B4c5fcd7570a709DeC05D68EA19c82A9ec",
+      "fee": 3000,
+      "dex": "uniswap-v3"
+    },
+    {
+      "token": "0x6982508145454CE325dDbE47a25d4ec3d2311933",
+      "pool": "0x11950d141EcB863F01007AdD7D1A342041227b58",
+      "fee": 3000,
+      "dex": "uniswap-v3"
+    },
+    {
+      "token": "0x6982508145454CE325dDbE47a25d4ec3d2311933",
+      "pool": "0x3202AcfD55232f3706aa81a4F18A98686B5e1d1B",
+      "fee": 10000,
+      "dex": "pancakeswap-v3"
+    },
+    {
+      "token": "0x7Fc66500c84A76ad7e9c93437bFc5Ac33E2DDaE9",
+      "pool": "0x4674abc5796e1334B5075326b39B748bee9EaA34",
+      "fee": 500,
+      "dex": "uniswap-v3"
+    },
+    {
+      "token": "0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32",
+      "pool": "0xa3f558aebAecAf0e11cA4b2199cC5Ed341edfd74",
+      "fee": 3000,
+      "dex": "uniswap-v3"
+    },
+    {
+      "token": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+      "pool": "0x06da0fd433C1A5D7a4faa01111c044910A184553",
+      "fee": 3000,
+      "dex": "sushiswap-v2"
+    },
+    {
+      "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "pool": "0x397FF1542f962076d0BFE58eA045FfA2d347ACa0",
+      "fee": 3000,
+      "dex": "sushiswap-v2"
+    },
+    {
+      "token": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+      "pool": "0xC3D03e4F041Fd4CD388c549Ee2A29a9E5075882f",
+      "fee": 3000,
+      "dex": "sushiswap-v2"
+    },
+    {
+      "token": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+      "pool": "0xCEfF51756c56CefFCA006cD410B03FFC46dd3a58",
+      "fee": 3000,
+      "dex": "sushiswap-v2"
+    },
+    {
+      "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "pool": "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc",
+      "fee": 3000,
+      "dex": "uniswap-v2"
+    },
+    {
+      "token": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+      "pool": "0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852",
+      "fee": 3000,
+      "dex": "uniswap-v2"
     }
   ],
   "network": {
@@ -41,18 +177,19 @@
     "max_fee_wei": "150000000000"
   },
   "filters": {
-    "freshness_ms": 15000,
+    "freshness_ms": 45000,
     "impact_bp": 100,
     "volatility_bp": 300,
     "probe_mult": 10,
     "dex_allow": [
       "uniswap-v3",
       "pancakeswap-v3",
-      "sushiswap-v3"
+      "sushiswap-v2",
+      "uniswap-v2"
     ]
   },
   "decision": {
-    "poll_ms": 8000,
+    "poll_ms": 15000,
     "probe_wei": "100000000000000",
     "min_trade_wei": "100000000000000",
     "max_trade_wei": "10000000000000000",
@@ -70,6 +207,7 @@
       "dashboard",
       "venues",
       "trades"
-    ]
+    ],
+    "bind": "0.0.0.0"
   }
 }

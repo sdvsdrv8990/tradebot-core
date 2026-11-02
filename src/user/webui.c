@@ -22,7 +22,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define WEBUI_SNAP_MAX   (8 * 1024)
+#define WEBUI_SNAP_MAX   (16 * 1024)
 #define WEBUI_PAGE_MAX   (32 * 1024)
 #define WEBUI_LEDGER_TAIL (64 * 1024)
 
@@ -43,6 +43,7 @@ typedef struct tb_webui {
     uint32_t     pages_n;
     char         ledger_path[512];
     char         logos_dir[380]; /* ./logos — локальные лого /logo/... */
+    char         bind[TB_WEBUI_BIND_MAX]; /* listen-адрес (для сообщений) */
 } tb_webui_t;
 
 /* ---- HTML-оболочка (тема + навигация + автообновление) ---- */
@@ -116,36 +117,48 @@ static const char SHELL_JS[] =
     "return u?('<a class=\"dex\" href=\"'+u+'\" target=\"_blank\" "
     "rel=\"noreferrer\">'+inner+'</a>'):inner};";
 
-/* Собрать страницу: оболочка + навигация (активная подсвечена) + JS. */
+/* Собрать страницу: оболочка + навигация (активная подсвечена) + JS.
+ * Добавление с клампом: о += без клампа уводит за cap и портит память
+ * следом за буфером (страницы растут — рано или поздно догнали бы). */
+#define PG_APPEND(...) do {                                             \
+        if (o + 1 < cap) {                                              \
+            int _n = snprintf(out + o, cap - o, __VA_ARGS__);           \
+            if (_n > 0)                                                 \
+                o += (size_t)_n;                                        \
+        }                                                               \
+        if (o + 1 >= cap) {                                             \
+            o = cap - 1;                                                \
+            out[o] = '\0';                                            \
+        }                                                               \
+    } while (0)
+
 static size_t build_page(tb_webui_t *w, char *out, size_t cap, uint32_t pi)
 {
-    size_t o = (size_t)snprintf(out, cap, "%s", SHELL_HEAD);
-    o += (size_t)snprintf(out + o, cap - o, "%s", SHELL_JS);
+    size_t o = 0;
+    PG_APPEND("%s", SHELL_HEAD);
+    PG_APPEND("%s", SHELL_JS);
 
     pthread_mutex_lock(&w->lock);
-    o += (size_t)snprintf(out + o, cap - o,
-                          "const NAV=[");
+    PG_APPEND("const NAV=[");
     for (uint32_t i = 0; i < w->pages_n; i++)
-        o += (size_t)snprintf(out + o, cap - o,
-                              "%s{p:\"%s\",t:\"%s\"}",
-                              i ? "," : "", w->pages[i].path,
-                              w->pages[i].title);
-    o += (size_t)snprintf(out + o, cap - o, "];const ACT=%u;", pi);
+        PG_APPEND("%s{p:\"%s\",t:\"%s\"}",
+                  i ? "," : "", w->pages[i].path, w->pages[i].title);
+    PG_APPEND("];const ACT=%u;", pi);
     const char *js = w->pages[pi].js;
     pthread_mutex_unlock(&w->lock);
 
-    o += (size_t)snprintf(out + o, cap - o,
+    PG_APPEND(
         "const __last={};/* анти-мерцание: те же данные — не перерисовываем */"
-    "const changed=(k,s)=>{if(__last[k]===s)return false;__last[k]=s;"
-    "return true};"
-    "document.getElementById('nav').innerHTML=NAV.map((n,i)=>"
-        "'<a href=\"'+n.p+'\" class=\"'+(i===ACT?'on':'')+'\">'+n.t+'</a>')"
+        "const changed=(k,s)=>{if(__last[k]===s)return false;__last[k]=s;"
+        "return true};"
+        "document.getElementById('nav').innerHTML=NAV.map((n,i)=>"
+            "'<a href=\"'+n.p+'\" class=\"'+(i===ACT?'on':'')+'\">'+n.t+'</a>')"
         ".join('');");
-    o += (size_t)snprintf(out + o, cap - o, "%s", js);
-    o += (size_t)snprintf(out + o, cap - o,
-        "tick();setInterval(tick,2000);</script></body></html>");
+    PG_APPEND("%s", js);
+    PG_APPEND("tick();setInterval(tick,2000);</script></body></html>");
     return o;
 }
+#undef PG_APPEND
 
 /* ---- HTTP-ответы ---- */
 
@@ -390,17 +403,27 @@ static void *web_thread(void *arg)
 /* ---- lifecycle ---- */
 
 int tb_webui_start(tb_webui_t **out, uint16_t want_port,
-                   const char *ledger_path, tb_error_t *err)
+                   const char *bind_addr, const char *ledger_path,
+                   tb_error_t *err)
 {
     if (!out || !ledger_path)
         TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
                       "webui: аргументы");
+
+    /* listen-адрес: NULL/пусто -> только локально */
+    const char *bind_str = (bind_addr && bind_addr[0]) ? bind_addr
+                                                        : "127.0.0.1";
+    uint32_t host = 0;
+    if (inet_pton(AF_INET, bind_str, &host) != 1)
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                      "webui: bind '%s' не IPv4", bind_str);
 
     tb_webui_t *w = calloc(1, sizeof(*w));
     if (!w)
         TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "webui");
     snprintf(w->ledger_path, sizeof(w->ledger_path), "%s", ledger_path);
     snprintf(w->logos_dir, sizeof(w->logos_dir), "%s", "./logos");
+    snprintf(w->bind, sizeof(w->bind), "%s", bind_str);
     pthread_mutex_init(&w->lock, NULL);
 
     int bound = -1;
@@ -412,7 +435,7 @@ int tb_webui_start(tb_webui_t **out, uint16_t want_port,
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
         struct sockaddr_in a = {0};
         a.sin_family = AF_INET;
-        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_addr.s_addr = host; /* уже сетевой порядок из inet_pton */
         a.sin_port = htons((uint16_t)(want_port + try));
         if (bind(fd, (struct sockaddr *)&a, sizeof(a)) == 0
             && listen(fd, 8) == 0) {

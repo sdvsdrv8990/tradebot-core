@@ -106,7 +106,8 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
         TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
                       "config: weth обязателен");
 
-    /* rpc: [{name, url, quoter, host_pinned?, pools: [addr...]}] */
+    /* rpc: [{name, url, quoter, router?, factory?, type?, host_pinned?}] —
+     * пулы бирже тут НЕ объявляются (В9: реестр = pools[].dex ниже) */
     auto rpc = doc.FindMember("rpc");
     if (rpc != doc.MemberEnd() && rpc->value.IsArray()) {
         for (const auto &v : rpc->value.GetArray()) {
@@ -126,27 +127,38 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
                 TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
                               "config: rpc[%u].quoter не адрес",
                               out->dex.venues_n);
+            if (!addr_field(v, "router", &vn.router, err))
+                TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                              "config: rpc[%u].router не адрес",
+                              out->dex.venues_n);
+            if (!addr_field(v, "factory", &vn.factory, err))
+                TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                              "config: rpc[%u].factory не адрес",
+                              out->dex.venues_n);
+            { /* тип биржи: метод котировки хопа; нет поля -> V3 */
+                auto t = v.FindMember("type");
+                if (t != v.MemberEnd()) {
+                    if (!t->value.IsString())
+                        TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                                      "config: rpc[%u].type не строка",
+                                      out->dex.venues_n);
+                    const char *s = t->value.GetString();
+                    if (strcmp(s, "v3") == 0)
+                        vn.kind = TB_DEX_V3;
+                    else if (strcmp(s, "v2") == 0)
+                        vn.kind = TB_DEX_V2;
+                    else
+                        TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                                      "config: rpc[%u].type '%s' (v2|v3)",
+                                      out->dex.venues_n, s);
+                }
+            }
             uint64_t tmo = 0;
             if (!u64_field(v, "timeout_ms", &tmo))
                 TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
                               "config: rpc[%u].timeout_ms",
                               out->dex.venues_n);
             vn.timeout_ms = (uint32_t)tmo;
-            auto pools = v.FindMember("pools");
-            if (pools != v.MemberEnd() && pools->value.IsArray()) {
-                for (const auto &pv : pools->value.GetArray()) {
-                    if (!pv.IsString())
-                        TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
-                                      "config: pools[] не строки");
-                    if (vn.pools_n >= TB_DEX_POOLS_PER_VENUE)
-                        TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
-                                      "config: много пулов у venue");
-                    if (tb_addr_from_hex(&vn.pools[vn.pools_n++],
-                                         pv.GetString(), err) != 0)
-                        TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
-                                      "config: pools[] не адрес");
-                }
-            }
             out->dex.venues_n++;
         }
     }
@@ -172,6 +184,28 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
                               "config: pools[%u].dex", out->pools_n);
             out->pools_n++;
         }
+    }
+
+    /* В9 — реестр: пул приписывается бирже ИМЕННО по pools[].dex, здесь
+     * и в одном месте. Двойное объявление (rpc[].pools + pools[]) убрано:
+     * рассинхрон невозможен по построению. */
+    for (uint32_t i = 0; i < out->pools_n; i++) {
+        const tb_arb_pool_t &p = out->pools[i];
+        int v = -1;
+        for (uint32_t k = 0; k < out->dex.venues_n; k++)
+            if (strcmp(out->dex.venues[k].name, p.dex) == 0) {
+                v = (int)k;
+                break;
+            }
+        if (v < 0)
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: pools[%u].dex '%s' нет в rpc[]", i,
+                          p.dex);
+        if (out->dex.venues[v].pools_n >= TB_DEX_POOLS_PER_VENUE)
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: у биржи %s максимум пулов (%d)", p.dex,
+                          TB_DEX_POOLS_PER_VENUE);
+        out->dex.venues[v].pools[out->dex.venues[v].pools_n++] = p.pool;
     }
 
     /* filters: {freshness_ms, impact_bp, volatility_bp, probe_mult,
@@ -255,7 +289,8 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
     out->dex.fill_delay_min_ms = (uint32_t)fmin;
     out->dex.fill_delay_max_ms = (uint32_t)fmax;
 
-    /* web: {port, refresh_ms, pages[]} — какие страницы-микромодули подняты */
+    /* web: {port, bind, refresh_ms, pages[]} — какие страницы-микромодули
+     * подняты; bind — listen-адрес ("0.0.0.0" = с других машин) */
     auto web = doc.FindMember("web");
     if (web != doc.MemberEnd() && web->value.IsObject()) {
         const auto &v = web->value;
@@ -265,6 +300,9 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
                           "config: web числа");
         out->web.port = (uint16_t)port;
         out->web.refresh_ms = (uint32_t)refr;
+        if (!str_field(v, "bind", out->web.bind, sizeof(out->web.bind)))
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: web.bind");
         auto ps = v.FindMember("pages");
         if (ps != v.MemberEnd() && ps->value.IsArray()) {
             for (auto &p : ps->value.GetArray()) {
@@ -315,6 +353,8 @@ extern "C" void tb_arb_defaults(tb_arb_cfg_t *cfg)
         cfg->web.port = 8080;
     if (cfg->web.refresh_ms == 0)
         cfg->web.refresh_ms = 2000;
+    if (cfg->web.bind[0] == '\0')
+        snprintf(cfg->web.bind, sizeof(cfg->web.bind), "127.0.0.1");
     if (cfg->web.pages_n == 0) {
         const char *std[] = {"dashboard", "venues", "trades"};
         for (const char *s : std)

@@ -33,6 +33,7 @@
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509_crt.h"
+#include "psa/crypto.h"
 #include "tb/core/time.h"
 
 #define NET_FAIL(code, ...)                                     \
@@ -778,6 +779,20 @@ out:
 tb_http_t *tb_http_net_create(const char *user_agent, const char *ca_file,
                               tb_error_t *err)
 {
+    /* PSA Crypto (ECDH/ECDSA внутри TLS-рукопожатий) обязан быть
+     * инициализирован до первого параллельного запроса: ленивая
+     * инициализация из воркеров гоняется за слотами ключей.
+     * Повторный вызов безвреден (PSA_SUCCESS / ALREADY_PERMITTED). */
+    static bool psa_ready = false;
+    if (!psa_ready) {
+        if (psa_crypto_init() != PSA_SUCCESS) {
+            TB_ERROR_SET(err, TB_DOMAIN_NET, TB_NET_TLS,
+                         "psa_crypto_init");
+            return NULL;
+        }
+        psa_ready = true;
+    }
+
     tb_http_t *h = calloc(1, sizeof(*h));
     net_ctx_t *c = calloc(1, sizeof(*c));
     if (!h || !c) {

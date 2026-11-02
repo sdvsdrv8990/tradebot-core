@@ -131,6 +131,7 @@ add_library(tb_user STATIC
   src/user/filters.c
   src/user/decision.c
   src/user/arb.c
+  src/user/market.c
   src/user/webui.c
 )
 target_include_directories(tb_user PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -198,6 +199,7 @@ set(TB_C_TESTS
   test_filters
   test_decision
   test_config
+  test_market
   test_ids
   test_details
   test_ctx
@@ -218,6 +220,7 @@ target_link_libraries(test_safe_exec PRIVATE tb_dex)
 target_link_libraries(test_sign PRIVATE tb_sign)
 target_link_libraries(test_filters PRIVATE tb_user)
 target_link_libraries(test_decision PRIVATE tb_user)
+target_link_libraries(test_market PRIVATE tb_user tb_runtime)
 target_link_libraries(test_config PRIVATE tb_runtime)
 
 add_executable(test_envelope tests/test_envelope.cpp)

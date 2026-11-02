@@ -33,17 +33,20 @@ extern "C" {
 
 struct tb_loop;
 
-#define TB_ARB_MAX_POOLS   16
+#define TB_ARB_MAX_POOLS   32
 #define TB_ARB_HISTORY_LEN 8
 
 /* ---- Веб-морда: подключаемые страницы-микромодули ----
  * Конфиг — единый источник истины: какие страницы подняты, порт и
  * период обновления. Имена: dashboard | venues | trades. */
 #define TB_ARB_WEB_PAGES_MAX 8
+#define TB_WEBUI_BIND_MAX 16
 
 typedef struct tb_arb_web_cfg {
     uint16_t port;        /* 0 -> 8080 */
     uint32_t refresh_ms;  /* 0 -> 2000 */
+    char     bind[TB_WEBUI_BIND_MAX]; /* listen-адрес; "" -> 127.0.0.1,
+                                       * "0.0.0.0" — доступ с других машин */
     char     pages[TB_ARB_WEB_PAGES_MAX][24];
     uint32_t pages_n;     /* 0 -> все стандартные */
 } tb_arb_web_cfg_t;
@@ -96,6 +99,18 @@ int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path, tb_error_t *err);
 /* Применить дефолты к нулевым полям. */
 void tb_arb_defaults(tb_arb_cfg_t *cfg);
 
+/* Валидатор целостности конфига (В2, fail-fast до сети): каждый
+ * pools[].pool обязан состоять в rpc[].pools ровно одной биржи, её имя —
+ * совпадать с pools[].dex; дубли адресов — ошибка. 0 — целостно. */
+int tb_arb_cfg_validate(const tb_arb_cfg_t *cfg, tb_error_t *err);
+
+/* Проверка конфига на цепи (В4, fail-fast старта, блокирующие eth_call):
+ * для каждой биржи с factory — Factory.getPool(weth, token, fee) обязан
+ * вернуть адрес из конфига. replay/offline — не вызывать. 0 — вся
+ * идентичность подтверждена цепью. */
+int tb_arb_cfg_verify(const tb_arb_cfg_t *cfg, tb_http_t *http,
+                      tb_error_t *err);
+
 /* ---- Снапшот рынка и история ---- */
 
 typedef struct tb_arb_snap {
@@ -104,6 +119,9 @@ typedef struct tb_arb_snap {
     tb_addr_t token;
     uint32_t  fee;
     char      dex[TB_DEX_NAME_MAX];
+    char      symbol[16];  /* токен с цепи (В5); пусто — короткий адрес */
+    uint8_t   decimals;   /* токен с цепи (В5); 0 — неизвестно */
+    uint64_t  block;      /* блок котировок батча (В6); 0 — неизвестен */
     uint64_t  ts_ms;      /* момент котировки */
     tb_u256_t buy_out;    /* TOKEN за probe_wei (WETH -> TOKEN) */
     tb_u256_t big_out;    /* TOKEN за probe_wei * mult (ликвидность) */
@@ -218,7 +236,37 @@ const tb_arb_pool_t *tb_arb_pool(const tb_arb_t *a, size_t i);
 /* Последняя котировка пула i (копия из решённого батча); NULL — ещё не
  * котировался или меньше i пулов. */
 const tb_arb_snap_t *tb_arb_last_snap(const tb_arb_t *a, size_t i);
+/* Весь последний батч одним куском (n — число снапшотов). */
+const tb_arb_snap_t *tb_arb_last_snaps(const tb_arb_t *a, size_t *n);
 uint64_t           tb_arb_probe_wei(const tb_arb_t *a);
+
+/* ---- Снапшот рынка для страницы «Биржи и цены» (market.c) ---- */
+
+/* Реальная котировка лучшей пары батча (В7): маршрут WETH->TOKEN->WETH
+ * через оба пула, размер probe. profit = out − in (может быть отрицательным
+ * — тогда честный минус, а не «оценка спреда»). */
+typedef struct tb_arb_route_quote {
+    bool     ok;       /* котировка донесена */
+    char     symbol[16];
+    char     buy_dex[TB_DEX_NAME_MAX];
+    char     sell_dex[TB_DEX_NAME_MAX];
+    uint32_t spread_bp;   /* оценка спреда той же пары (б.п.) */
+    tb_u256_t in_wei;
+    tb_u256_t out_wei;
+    bool     profit_neg;
+    tb_u256_t profit_wei; /* |out − in| */
+} tb_arb_route_quote_t;
+
+/* Чистая сборка JSON рынка: venues (пулы под наблюдением), pairs (спреды
+ * ТОЛЬКО свежих снапшотов одного блока — В1/В6), quote (В7, опционально).
+ * Буфер усекается безопасно. 0 — собран. */
+int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
+                       size_t n, uint64_t now_ms,
+                       const tb_arb_route_quote_t *rq, char *out, size_t cap);
+
+/* Последняя реальная котировка лучшей пары (копия из решённого батча);
+ * NULL — ещё не было. */
+const tb_arb_route_quote_t *tb_arb_route_quote(const tb_arb_t *a);
 
 /* a/b в базисных пунктах: (a*10000)/b; ложь при b==0/данных безумия.
  * Тот же алгоритм, что в фильтре ликвидности. */

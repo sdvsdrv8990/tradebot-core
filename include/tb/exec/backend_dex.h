@@ -35,18 +35,31 @@ extern "C" {
 #endif
 
 #define TB_DEX_MAX_VENUES 8
-#define TB_DEX_POOLS_PER_VENUE 8
+#define TB_DEX_POOLS_PER_VENUE 24
 #define TB_DEX_NAME_MAX 24
 #define TB_DEX_MAX_SESSIONS 32
 
-/* ---- Биржа (venue): RPC + quoter + её пулы ---- */
+/* Тип биржи: метод котировки одного хопа. */
+typedef enum tb_dex_kind {
+    TB_DEX_V3 = 0,  /* QuoterV2.quoteExactInputSingle: quoter + factory.getPool */
+    TB_DEX_V2 = 1,  /* Router.getAmountsOut: router + factory.getPair;
+                     * комиссия 0.30% уже внутри котировки */
+} tb_dex_kind_t;
+
+/* ---- Биржа (venue): RPC + метод котировки + её пулы ---- */
 typedef struct tb_exec_dex_venue {
     char       name[TB_DEX_NAME_MAX];          /* "uniswap-v3" — в записях */
     char       rpc_url[TB_HTTP_URL_MAX];       /* JSON-RPC endpoint (HTTPS) */
     char       rpc_host_pinned[TB_HTTP_HOST_MAX]; /* непусто: IP для
                                                      соединения, Host/SNI
                                                      из rpc_url */
-    tb_addr_t  quoter;                         /* адрес QuoterV2 биржи */
+    uint8_t    kind;                           /* tb_dex_kind_t; 0 = V3
+                                                 * (дефолт прежних конфигов) */
+    tb_addr_t  quoter;                         /* V3: адрес QuoterV2 биржи */
+    tb_addr_t  router;                         /* V2: Router02.getAmountsOut */
+    tb_addr_t  factory;                        /* V3: getPool(tokenA,tokenB,
+                                                 * fee); V2: getPair(a,b).
+                                                 * Ноль — не проверяем */
     uint32_t   timeout_ms;                     /* 0 -> 8000 */
 
     tb_addr_t  pools[TB_DEX_POOLS_PER_VENUE];  /* пулы биржи: хоп с таким
@@ -84,6 +97,37 @@ typedef struct tb_exec_dex_stats {
     uint64_t fills;          /* shadow-заполнений */
 } tb_exec_dex_stats_t;
 const tb_exec_dex_stats_t *tb_exec_dex_stats(const tb_exec_backend_t *b);
+
+/* ---- Стартерные вызовы к цепи (блокирующие; только на старте/в воркерах).
+ * Транспорт и RPC берутся из venue — бэкенд не нужен. ---- */
+
+/* Подсказка блока для котировок ЭТОГО потока: != 0 — все eth_call потока
+ * котируются на указанном блоке (второй элемент params), 0 — "latest".
+ * Потоковая (TLS): воркер батча пинит котировки блоком батча, поток
+ * цикла (submit/monitor) котируется по latest. */
+void tb_exec_dex_set_quote_block(uint64_t block);
+
+/* eth_blockNumber через RPC venue (без пина блока). 0 — успех. */
+int tb_exec_dex_block_number(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                             uint64_t *block, tb_error_t *err);
+
+/* Проверка пула на цепи: V3 — Factory.getPool(tokenA, tokenB, fee),
+ * V2 — Factory.getPair(tokenA, tokenB); адрес с цепи обязан совпасть с
+ * expect_pool (конфиг — ожидание, цепь — истина).
+ * 0 — совпало (или v->factory нулевой: проверка пропущена).
+ * Несовпадение/пула нет — ошибка TB_EXEC_BACKEND, fail-fast старта. */
+int tb_exec_dex_verify_pool(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                            const tb_addr_t *token_a, const tb_addr_t *token_b,
+                            uint32_t fee, const tb_addr_t *expect_pool,
+                            tb_error_t *err);
+
+/* symbol()/decimals() токена с цепи (два eth_call). symbol — строка ABI
+ * (в т.ч. bytes32 старых токенов), обрезается до symbol_cap-1. 0 — оба
+ * донесены; ошибка — вызывающий решает (фолбэк на короткий адрес). */
+int tb_exec_dex_token_info(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                           const tb_addr_t *token, char *symbol,
+                           size_t symbol_cap, uint8_t *decimals,
+                           tb_error_t *err);
 
 #ifdef __cplusplus
 }
