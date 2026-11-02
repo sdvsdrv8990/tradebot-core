@@ -792,6 +792,19 @@ tb_http_t *tb_http_net_create(const char *user_agent, const char *ca_file,
         }
         psa_ready = true;
     }
+    /* Прогрев глобального списка ciphersuites: его ленивая
+     * инициализация (ssl_list_ciphersuites) в mbedTLS БЕЗ мьютекса —
+     * первый mbedtls_ssl_config_defaults обязан пройти до любого
+     * параллельного использования транспорта (стартовые проверки
+     * идут в 6 потоков). */
+    {
+        mbedtls_ssl_config warm;
+        mbedtls_ssl_config_init(&warm);
+        (void)mbedtls_ssl_config_defaults(&warm, MBEDTLS_SSL_IS_CLIENT,
+                                          MBEDTLS_SSL_TRANSPORT_STREAM,
+                                          MBEDTLS_SSL_PRESET_DEFAULT);
+        mbedtls_ssl_config_free(&warm);
+    }
 
     tb_http_t *h = calloc(1, sizeof(*h));
     net_ctx_t *c = calloc(1, sizeof(*c));
