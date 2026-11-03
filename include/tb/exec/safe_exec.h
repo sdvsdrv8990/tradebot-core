@@ -1,16 +1,19 @@
 /* ==========================================================================
- *  tb/exec/safe_exec.h — живое исполнение из Safe (v0.4).
+ *  tb/exec/safe_exec.h — подготовка исполнения из Safe (v0.5, P0).
  *
- *  Safe 1-из-2: бот-владелец исполняет свопы через execTransaction —
- *  средства не покидают контракт, прибыль остаётся в нём. Риск-конверт
- *  ключа бота = содержимое Safe (горячий ключ).
+ *  Модель ПОДПИСАНИЯ ЧЕЛОВЕКОМ (propose-only): бот НИКОГДА не отправляет
+ *  транзакции сам. Он готовит SafeTx (EIP-712-хеш, calldata, свою подпись
+ *  владельца) и отдаёт предложение наверх — журнал/файл/консоль; человек
+ *  проверяет параметры в кошельке (Safe UI) и подписывает. Исполнение
+ *  происходит после набора порога подписей; бот узнаёт о нём по росту
+ *  nonce Safe и рассчитывает результат дельтой баланса.
  *
- *  Здесь: обёртка SafeTx (EIP-712) поверх подписи EIP-1559 (tb_sign),
- *  сборка calldata SwapRouter02 exactInput и Safe execTransaction,
- *  RPC-помощники (nonce/газ/отправка/receipt/balanceOf/allowance).
- *  Используется DEX-адаптером в live-режиме; конвейер не меняется.
- * ==========================================================================
- */
+ *  Здесь: сборка calldata (SwapRouter02 exactInput, ERC20 approve),
+ *  EIP-712 SafeTx-хеш, подпись владельца-бота (прямая, v=27/28),
+ *  RPC-помощники (chainId/nonce/balanceOf/allowance).
+ *  Автономная отправка (v0.4 tb_safe_send_exec) УДАЛЕНА: мёртвый путь
+ *  в денежном контуре опаснее, чем полезен.
+ * ========================================================================== */
 #ifndef TB_EXEC_SAFE_EXEC_H
 #define TB_EXEC_SAFE_EXEC_H
 
@@ -27,6 +30,16 @@
 extern "C" {
 #endif
 
+/* Окно наблюдения предложения: сколько бот ждёт подписей человека,
+ * прежде чем снять локальное наблюдение (на цепи ничего не происходит;
+ * человек может исполнить и позже — min_out в calldata защищает его). */
+#define TB_SAFE_PROPOSAL_WATCH_MS 1800000ull /* 30 минут */
+
+/* Рабочий лимит approve WETH->роутер: max_trade_wei x MULT — ограничен,
+ * но не требует approve на каждую сделку (обычная практика роутеров:
+ * либо лимит, либо бесконечность; мы — за ограниченный). */
+#define TB_SAFE_APPROVE_MULT 100ull
+
 typedef struct tb_safe_cfg {
     char       rpc_url[TB_HTTP_URL_MAX];
     char       rpc_host_pinned[TB_HTTP_HOST_MAX];
@@ -34,8 +47,8 @@ typedef struct tb_safe_cfg {
     tb_addr_t  router;    /* SwapRouter02 */
     tb_key_t   key;       /* ключ бота-владельца (ok=true) */
     uint64_t   chain_id;  /* 0 -> eth_chainId */
-    uint64_t   gas_limit; /* 0 -> eth_estimateGas + 30% запас */
-    uint64_t   max_fee_wei; /* потолок base+priority; 0 -> без потолка */
+    uint64_t   gas_limit; /* зарезервировано (propose не оценивает газ) */
+    uint64_t   max_fee_wei; /* зарезервировано (propose не отправляет) */
     uint32_t   timeout_ms;  /* 0 -> 10000 */
 } tb_safe_cfg_t;
 
@@ -49,6 +62,11 @@ size_t tb_safe_build_exact_input(uint8_t *buf, size_t cap,
                                  const tb_u256_t *amount_in,
                                  const tb_u256_t *min_out);
 
+/* ERC20.approve(address spender, uint256 amount). Возврат — длина. */
+size_t tb_safe_build_approve(uint8_t *buf, size_t cap,
+                             const tb_addr_t *spender,
+                             const tb_u256_t *amount);
+
 /* Safe.execTransaction(to, value, data, op=0, 0,0,0, 0,0, sig). */
 size_t tb_safe_build_exec_tx(uint8_t *buf, size_t cap, const tb_addr_t *to,
                              uint64_t value, const uint8_t *data,
@@ -59,15 +77,53 @@ int tb_safe_tx_hash(const tb_safe_cfg_t *cfg, const tb_addr_t *to,
                     uint64_t value, const uint8_t *data, size_t data_len,
                     uint64_t safe_nonce, uint8_t hash[32], tb_error_t *err);
 
-/* Подпись SafeTx ключом бота (v = parity + 27, ECDSA-владелец). */
+/* Подпись владельца-бота: ПРЯМАЯ над safeTxHash (EIP-712: Safe для
+ * v=27/28 восстанавливает адрес из самого хеша типизированных данных;
+ * вариант eth_sign требует v=0 — не используем). */
 int tb_safe_sign(const tb_safe_cfg_t *cfg, const uint8_t safe_tx_hash[32],
                  uint8_t sig65[65], tb_error_t *err);
+
+/* ---- Предложение SafeTx (propose-only) ---- */
+
+typedef struct tb_safe_proposal {
+    uint64_t  chain_id;
+    tb_addr_t safe;        /* verifyingContract */
+    tb_addr_t to;          /* цель внутреннего вызова (роутер/токен) */
+    uint64_t  value;       /* всегда 0 в наших сценариях */
+    uint8_t   data[512];   /* внутренний calldata (exactInput/approve) */
+    size_t    data_len;
+    uint64_t  safe_nonce;  /* nonce Safe на момент подготовки */
+    uint8_t   safe_tx_hash[32]; /* EIP-712 SafeTx-хеш */
+    uint8_t   sig65[65];   /* подпись бота (r, s, v=27/28) */
+    uint64_t  created_ms;
+    uint64_t  expires_at_ms; /* окно наблюдения (0 -> WATCH_MS) */
+} tb_safe_proposal_t;
+
+/* Подготовить предложение: chainId (если 0 — с цепи) + nonce + хеш +
+ * подпись. Транзакции в сеть не отправляет. 0 — успех. */
+int tb_safe_propose_exec(tb_http_t *h, const tb_safe_cfg_t *c,
+                         const tb_addr_t *to, uint64_t value,
+                         const uint8_t *data, size_t data_len,
+                         uint64_t now_ms, tb_safe_proposal_t *out,
+                         tb_error_t *err);
+
+/* Готовый calldata execTransaction с подписью бота (для инструментов
+ * человека: кошелёк добавит свою подпись и отправит). Возврат — длина. */
+size_t tb_safe_proposal_exec_calldata(const tb_safe_proposal_t *p,
+                                      uint8_t *buf, size_t cap);
+
+/* JSON-артефакт предложения (все параметры + хеш + подпись).
+ * Возврат — записанная длина без NUL. */
+size_t tb_safe_proposal_json(const tb_safe_proposal_t *p, char *out,
+                             size_t cap);
 
 /* ---- RPC (блокирующие; вызывать из воркеров/submit) ---- */
 
 int tb_safe_chain_id(tb_http_t *h, const tb_safe_cfg_t *c, uint64_t *out,
                      tb_error_t *err);
-/* Нонс Safe (eth_call nonce() контракта Safe — не аккаунт-нонс!). */
+/* Нонс Safe (eth_call nonce() контракта Safe — не аккаунт-нонс!):
+ * рост nonce = транзакция исполнена (или вытеснена) — сигнал завершить
+ * наблюдение за предложением. */
 int tb_safe_nonce(tb_http_t *h, const tb_safe_cfg_t *c, uint64_t *out,
                   tb_error_t *err);
 int tb_safe_balance_of(tb_http_t *h, const tb_safe_cfg_t *c,
@@ -77,17 +133,6 @@ int tb_safe_allowance(tb_http_t *h, const tb_safe_cfg_t *c,
                       const tb_addr_t *token, const tb_addr_t *owner,
                       const tb_addr_t *spender, tb_u256_t *out,
                       tb_error_t *err);
-
-/* Собрать, подписать и отправить execTransaction. Возврат — хеш
- * транзакции. Синхронно делает 3-5 RPC-вызовов. */
-int tb_safe_send_exec(tb_http_t *h, const tb_safe_cfg_t *c, const tb_addr_t *to,
-                      uint64_t value, const uint8_t *data, size_t data_len,
-                      uint8_t tx_hash[32], tb_error_t *err);
-
-/* Receipt: is_null — ещё не смайнился; иначе status 0/1. */
-int tb_safe_receipt(tb_http_t *h, const tb_safe_cfg_t *c,
-                    const uint8_t tx_hash[32], bool *is_null, int *status,
-                    tb_error_t *err);
 
 #ifdef __cplusplus
 }

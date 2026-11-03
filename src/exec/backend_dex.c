@@ -29,13 +29,15 @@
 
 typedef struct dex_session {
     uint64_t   tx_id;      /* != 0 — занято */
-    tb_u256_t  amount_out; /* shadow: цена котировки; live: дельта баланса */
-    uint64_t   fill_at_ms;
-    /* live (v0.4): хеш отправленной транзакции + контекст дельты */
+    tb_u256_t  amount_out; /* shadow: цена котировки; live: оценка,
+                            * истина — дельта баланса после исполнения */
+    uint64_t   fill_at_ms; /* shadow: момент заполнения */
+    /* live (P0): предложение SafeTx ждёт подписей человека */
     bool       live;
-    uint8_t    tx_hash[32];
+    uint64_t   safe_nonce; /* nonce Safe на момент предложения */
+    uint64_t   expires_ms; /* окно наблюдения; истекло — отказ без цепи */
     tb_addr_t  out_token;  /* последний токен маршрута */
-    tb_u256_t  balance_before;
+    tb_u256_t  balance_before; /* для дельты после роста nonce */
 } dex_session_t;
 
 typedef struct dex_ctx {
@@ -529,7 +531,10 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
     }
 
     if (c->cfg.live) {
-        /* ---- живое исполнение из Safe (v0.4) ---- */
+        /* ---- live = propose-only (P0): подготовить SafeTx для подписи
+         * человеком; ничего не отправляем. Исполнение человек делает
+         * второй подписью в кошельке; результат узнаем ростом nonce
+         * и дельтой баланса. ---- */
         dex_session_t *s = NULL;
         for (size_t i = 0; i < TB_DEX_MAX_SESSIONS; i++)
             if (c->txs[i].tx_id == 0) {
@@ -557,26 +562,27 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
             TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW,
                           "dex: exactInput calldata");
 
-        uint8_t tx_hash[32];
-        tb_error_t serr = TB_ERROR_INIT;
-        if (tb_safe_send_exec(c->http, &c->cfg.safe, &c->cfg.safe.router, 0,
-                              calldata, calldata_len, tx_hash,
-                              &serr) != 0) {
-            *err = serr;
+        tb_safe_proposal_t prop;
+        if (tb_safe_propose_exec(c->http, &c->cfg.safe, &c->cfg.safe.router,
+                                 0, calldata, calldata_len, now_ms, &prop,
+                                 err) != 0)
             return -1;
-        }
+        tb_atomic_add_u64(&c->stats.proposals, 1);
+        if (c->cfg.on_propose)
+            c->cfg.on_propose(&prop, c->cfg.propose_user);
 
         memset(s, 0, sizeof(*s));
         s->tx_id = ++c->next_tx;
         s->live = true;
-        memcpy(s->tx_hash, tx_hash, 32);
+        s->safe_nonce = prop.safe_nonce;
+        s->expires_ms = prop.expires_at_ms;
         s->out_token = out_tok;
         s->balance_before = before;
         s->amount_out = out; /* оценка; истина придёт дельтой в poll */
 
         *tx_id = s->tx_id;
         *amount_out = out;
-        return 1; /* SUBMITTED: ждём майнинг */
+        return 1; /* ПРЕДЛОЖЕНО: ждём подписей и исполнения человеком */
     }
 
     dex_session_t *s = NULL;
@@ -619,23 +625,23 @@ static int dex_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
                       (unsigned long long)tx_id);
 
     if (s->live) {
-        bool is_null = false;
-        int status = 0;
-        tb_error_t rerr = TB_ERROR_INIT;
-        if (tb_safe_receipt(c->http, &c->cfg.safe, s->tx_hash, &is_null,
-                            &status, &rerr) != 0) {
-            *err = rerr;
-            return -1;
-        }
-        if (is_null)
-            return 1; /* ещё в мемпуле/блоке */
-
-        if (status != 1) {
+        /* Предложение ждёт человека: следим за nonce Safe. Истекло окно
+         * — отказ: на цепи ничего не было, газ не потрачен. */
+        if (now_ms > s->expires_ms) {
             s->tx_id = 0;
             TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
-                          "dex: транзакция Safe ревертнулась (status=0)");
+                          "dex: предложение истекло без подписей "
+                          "(на цепи ничего не произошло, газ цел)");
         }
 
+        uint64_t nonce = 0;
+        if (tb_safe_nonce(c->http, &c->cfg.safe, &nonce, err) != 0)
+            return -1;
+        if (nonce <= s->safe_nonce)
+            return 1; /* ещё не исполнено */
+
+        /* nonce вырос: человек исполнил (или вытеснил нашу транзакцию —
+         * дельта покажет факту без прикрас). Истина с цепи. */
         tb_u256_t after;
         tb_error_t berr = TB_ERROR_INIT;
         if (tb_safe_balance_of(c->http, &c->cfg.safe, &s->out_token,
@@ -648,7 +654,7 @@ static int dex_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
 
         s->tx_id = 0;
         tb_atomic_add_u64(&c->stats.fills, 1);
-        return 0; /* заполнено: фактический выход с цепи */
+        return 0; /* исполнено человеком: фактическая дельта */
     }
 
     if (now_ms < s->fill_at_ms)

@@ -73,6 +73,11 @@ typedef struct tb_exec_dex_venue {
     uint32_t   pools_n;
 } tb_exec_dex_venue_t;
 
+/* propose-only (P0): колбэк готового предложения SafeTx — вызывающий
+ * пишет журнал/файл/консоль. Вызывается из потока submit. */
+typedef void (*tb_exec_dex_proposal_cb)(const tb_safe_proposal_t *p,
+                                        void *user);
+
 typedef struct tb_exec_dex_cfg {
     tb_exec_dex_venue_t venues[TB_DEX_MAX_VENUES];
     uint32_t            venues_n;
@@ -81,10 +86,16 @@ typedef struct tb_exec_dex_cfg {
     uint32_t            fill_delay_max_ms;  /* 0 -> 900 */
     uint64_t            seed;               /* 0 -> tb_rdtsc() */
 
-    /* live: исполнение из Safe через execTransaction (v0.4). Котировки
-     * те же (QuoterV2), submit/poll — настоящие транзакции; фактический
-     * выход = дельта balanceOf(Safe). false -> shadow (по умолчанию). */
+    /* live: исполнение из Safe — модель ПОДПИСАНИЯ ЧЕЛОВЕКОМ (P0).
+     * Котировки те же (QuoterV2); submit ГОТОВИТ SafeTx (propose-only:
+     * calldata + EIP-712-хеш + подпись бота) и НЕ отправляет ничего;
+     * on_propose (если задан) вызывается из потока submit с готовым
+     * предложением. Poll следит за nonce Safe: вырос — исполнено
+     * (результат = дельта balanceOf), истёк окно наблюдения — отказ
+     * без цепи и газа. */
     bool                live;
+    tb_exec_dex_proposal_cb on_propose;
+    void               *propose_user;
     tb_safe_cfg_t       safe;
 } tb_exec_dex_cfg_t;
 
@@ -100,7 +111,8 @@ typedef struct tb_exec_dex_stats {
     uint64_t rpc_calls;      /* eth_call выполнено */
     uint64_t rpc_errors;     /* ошибок RPC/транспорта */
     uint64_t submits;        /* submit-вызовов */
-    uint64_t fills;          /* shadow-заполнений */
+    uint64_t fills;          /* shadow-заполнений + live-расчётов */
+    uint64_t proposals;      /* live: подготовлено предложений SafeTx */
 } tb_exec_dex_stats_t;
 const tb_exec_dex_stats_t *tb_exec_dex_stats(const tb_exec_backend_t *b);
 

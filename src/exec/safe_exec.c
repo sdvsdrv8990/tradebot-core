@@ -1,13 +1,12 @@
 #define TB_CURRENT_GROUP TB_G_DEX /* зона ответственности файла */
 
 /* ==========================================================================
- *  tb/exec/safe_exec.c — живое исполнение из Safe.
+ *  tb/exec/safe_exec.c — подготовка исполнения из Safe (propose-only).
  *
- *  Цепочка submit: chainId -> nonce(Safe) -> цены газа -> estimate ->
- *  потолок газа -> EIP-712 SafeTx-хеш -> подпись (v=parity+27) ->
- *  execTransaction calldata -> EIP-1559 -> eth_sendRawTransaction.
- *  Poll: eth_getTransactionReceipt; фактический выход исполнитель
- *  берёт дельтой balanceOf(Safe) — истина с цепи, не наша котировка.
+ *  Бот готовит: chainId -> nonce(Safe) -> EIP-712 SafeTx-хеш -> прямая
+ *  подпись владельца-бота (v=parity+27) -> предложение наверх.
+ *  Никакой отправки: исполнение — за человеком (вторая подпись в
+ *  кошельке). Результат бот читает дельтой balanceOf после роста nonce.
  * ========================================================================== */
 #include "tb/exec/safe_exec.h"
 
@@ -68,6 +67,7 @@ static void put_selector(uint8_t *p, size_t *n, uint32_t sel)
 #define SEL_EXEC_TX     0x6a761202u
 #define SEL_BALANCE_OF  0x70a08231u
 #define SEL_ALLOWANCE   0xdd62ed3eu
+#define SEL_APPROVE     0x095ea7b3u
 #define SEL_SAFE_NONCE  0x1d6da664u /* nonce() */
 
 /* ---- Calldata ---- */
@@ -99,6 +99,23 @@ size_t tb_safe_build_exact_input(uint8_t *buf, size_t cap,
     memset(buf + n, 0, padded);
     memcpy(buf + n, route->bytes, route->len);
     n += padded;
+    return n;
+}
+
+size_t tb_safe_build_approve(uint8_t *buf, size_t cap,
+                             const tb_addr_t *spender,
+                             const tb_u256_t *amount)
+{
+    /* approve(address,uint256): селектор + адрес + сумма */
+    if (cap < 4 + 64)
+        return 0;
+    size_t n = 0;
+    put_selector(buf, &n, SEL_APPROVE);
+    uint8_t w[32];
+    word_from_addr(w, spender);
+    put32(buf, &n, w);
+    word_from_u256(w, amount);
+    put32(buf, &n, w);
     return n;
 }
 
@@ -199,18 +216,15 @@ int tb_safe_tx_hash(const tb_safe_cfg_t *cfg, const tb_addr_t *to,
 int tb_safe_sign(const tb_safe_cfg_t *cfg, const uint8_t safe_tx_hash[32],
                  uint8_t sig65[65], tb_error_t *err)
 {
-    /* Safe ECDSA-владелец: подпись личного сообщения EIP-191
-     * keccak("\x19Ethereum Signed Message:\n32" || SafeTxHash), v=27/28 */
-    uint8_t pref[28 + 32], shash[32];
-    memcpy(pref, "\x19"
-                 "Ethereum Signed Message:\n32",
-           28);
-    memcpy(pref + 28, safe_tx_hash, 32);
-    tb_keccak256(pref, sizeof(pref), shash);
-
+    /* Прямая EIP-712 подпись: Safe для v=27/28 восстанавливает адрес
+     * ecrecover-ом из САМОГО safeTxHash. (Прежний вариант подписывал
+     * EIP-191-обёртку "\x19Ethereum Signed Message:\n32" с теми же
+     * v=27/28 — Safe восстановил бы чужой адрес и отверг GS026;
+     * обёртка легитимна только с v=0, мы её не используем.) */
+    (void)cfg;
     int parity = 0;
     tb_error_t serr = TB_ERROR_INIT;
-    if (tb_ecdsa_sign(&cfg->key, shash, sig65, sig65 + 32, &parity,
+    if (tb_ecdsa_sign(&cfg->key, safe_tx_hash, sig65, sig65 + 32, &parity,
                       &serr) != 0) {
         if (err)
             *err = serr;
@@ -218,6 +232,92 @@ int tb_safe_sign(const tb_safe_cfg_t *cfg, const uint8_t safe_tx_hash[32],
     }
     sig65[64] = (uint8_t)(parity + 27);
     return 0;
+}
+
+/* ---- Предложения (propose-only) ---- */
+
+int tb_safe_propose_exec(tb_http_t *h, const tb_safe_cfg_t *c,
+                         const tb_addr_t *to, uint64_t value,
+                         const uint8_t *data, size_t data_len,
+                         uint64_t now_ms, tb_safe_proposal_t *out,
+                         tb_error_t *err)
+{
+    if (!out || !data || data_len == 0 || data_len > sizeof(out->data))
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                      "propose: аргументы");
+
+    tb_safe_cfg_t cfg = *c;
+    memset(out, 0, sizeof(*out));
+    uint64_t chain = c->chain_id;
+    if (!chain && tb_safe_chain_id(h, &cfg, &chain, err) != 0)
+        return -1;
+    cfg.chain_id = chain;
+
+    uint64_t nonce = 0;
+    if (tb_safe_nonce(h, &cfg, &nonce, err) != 0)
+        return -1;
+
+    if (tb_safe_tx_hash(&cfg, to, value, data, data_len, nonce,
+                        out->safe_tx_hash, err) != 0)
+        return -1;
+    if (tb_safe_sign(&cfg, out->safe_tx_hash, out->sig65, err) != 0)
+        return -1;
+
+    out->chain_id = chain;
+    out->safe = c->safe;
+    out->to = *to;
+    out->value = value;
+    memcpy(out->data, data, data_len);
+    out->data_len = data_len;
+    out->safe_nonce = nonce;
+    out->created_ms = now_ms;
+    out->expires_at_ms = now_ms + TB_SAFE_PROPOSAL_WATCH_MS;
+    return 0;
+}
+
+size_t tb_safe_proposal_exec_calldata(const tb_safe_proposal_t *p,
+                                      uint8_t *buf, size_t cap)
+{
+    return tb_safe_build_exec_tx(buf, cap, &p->to, p->value, p->data,
+                                 p->data_len, p->sig65);
+}
+
+size_t tb_safe_proposal_json(const tb_safe_proposal_t *p, char *out,
+                             size_t cap)
+{
+    if (!p || !out || cap == 0)
+        return 0;
+
+    char safe_h[43], to_h[43], stx_h[67], sig_h[133], data_h[2 + 512 * 2 + 1];
+    tb_addr_to_hex(&p->safe, safe_h, sizeof(safe_h));
+    tb_addr_to_hex(&p->to, to_h, sizeof(to_h));
+    for (int i = 0; i < 32; i++)
+        sprintf(stx_h + 2 + i * 2, "%02x", p->safe_tx_hash[i]);
+    stx_h[0] = '0';
+    stx_h[1] = 'x';
+    for (int i = 0; i < 65; i++)
+        sprintf(sig_h + 2 + i * 2, "%02x", p->sig65[i]);
+    sig_h[0] = '0';
+    sig_h[1] = 'x';
+    data_h[0] = '0';
+    data_h[1] = 'x';
+    for (size_t i = 0; i < p->data_len; i++)
+        sprintf(data_h + 2 + i * 2, "%02x", p->data[i]);
+    data_h[2 + p->data_len * 2] = '\0';
+
+    int n = snprintf(out, cap,
+                     "{\"kind\":\"safe-proposal\",\"chain_id\":%llu,"
+                     "\"safe\":\"%s\",\"to\":\"%s\",\"value\":%llu,"
+                     "\"data\":\"%s\",\"operation\":0,\"safe_tx_gas\":0,"
+                     "\"base_gas\":0,\"gas_price\":\"0\",\"nonce\":%llu,"
+                     "\"safe_tx_hash\":\"%s\",\"bot_signature\":\"%s\","
+                     "\"created_ms\":%llu,\"expires_at_ms\":%llu}",
+                     (unsigned long long)p->chain_id, safe_h, to_h,
+                     (unsigned long long)p->value, data_h,
+                     (unsigned long long)p->safe_nonce, stx_h, sig_h,
+                     (unsigned long long)p->created_ms,
+                     (unsigned long long)p->expires_at_ms);
+    return n < 0 ? 0 : (size_t)n;
 }
 
 /* ---- RPC ---- */
@@ -417,150 +517,3 @@ int tb_safe_allowance(tb_http_t *h, const tb_safe_cfg_t *c,
                             err);
 }
 
-int tb_safe_receipt(tb_http_t *h, const tb_safe_cfg_t *c,
-                    const uint8_t tx_hash[32], bool *is_null, int *status,
-                    tb_error_t *err)
-{
-    char hash_hex[67];
-    strcpy(hash_hex, "0x");
-    for (int i = 0; i < 32; i++)
-        sprintf(hash_hex + 2 + i * 2, "%02x", tx_hash[i]);
-    char params[128];
-    snprintf(params, sizeof(params), "[\"%s\"]", hash_hex);
-
-    char res[512];
-    rpc_resp_owner_t owner = {0};
-    if (rpc_call(h, c, "eth_getTransactionReceipt", params, res, sizeof(res),
-                 &owner, err) != 0)
-        return -1;
-    /* статус ищем в СЫРОМ теле (объект receipt может быть длинным);
-     * st указывает внутрь owner.resp — используем ДО free (иначе UAF) */
-    const char *st = strstr(owner.body, "\"status\":\"0x");
-
-    if (strcmp(res, "null") == 0 || strstr(res, "null") == res) {
-        free(owner.resp);
-        *is_null = true;
-        return 0;
-    }
-    *is_null = false;
-    if (!st) {
-        free(owner.resp);
-        TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
-                      "receipt: нет статуса");
-    }
-    *status = (int)strtol(st + 12, NULL, 16);
-    free(owner.resp);
-    return 0;
-}
-
-int tb_safe_send_exec(tb_http_t *h, const tb_safe_cfg_t *c, const tb_addr_t *to,
-                      uint64_t value, const uint8_t *data, size_t data_len,
-                      uint8_t tx_hash[32], tb_error_t *err)
-{
-    uint64_t chain = c->chain_id;
-    if (!chain && tb_safe_chain_id(h, c, &chain, err) != 0)
-        return -1;
-    tb_safe_cfg_t cfg = *c;
-    cfg.chain_id = chain;
-
-    uint64_t safe_nonce = 0;
-    if (tb_safe_nonce(h, &cfg, &safe_nonce, err) != 0)
-        return -1;
-
-    uint64_t gas_price = 0, prio = 0;
-    if (rpc_u64_hex(h, &cfg, "eth_gasPrice", "[]", &gas_price, err) != 0)
-        return -1;
-    if (rpc_u64_hex(h, &cfg, "eth_maxPriorityFeePerGas", "[]", &prio, err)
-        != 0) {
-        /* не все узлы дают maxPriority — берём 1.5 gwei запас */
-        prio = 1500000000ull;
-        tb_error_clear(err);
-    }
-    if (cfg.max_fee_wei && gas_price + prio > cfg.max_fee_wei)
-        TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
-                      "газ %llu+%llu выше потолка %llu",
-                      (unsigned long long)gas_price,
-                      (unsigned long long)prio,
-                      (unsigned long long)cfg.max_fee_wei);
-
-    /* estimate: execTransaction с нулевой подписью (симуляция) */
-    static uint8_t exec_buf[1024 + 65536];
-    uint8_t zero_sig[65] = { 0 };
-    size_t exec_len = tb_safe_build_exec_tx(exec_buf, sizeof(exec_buf), to,
-                                            value, data, data_len, zero_sig);
-    if (!exec_len)
-        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW, "exec: calldata");
-
-    static char data_hex[4 + 2 * (1024 + 65536) + 3];
-    static char params[140000];
-    char from_hex[43], to_hex[43];
-    tb_addr_to_hex(&cfg.key.address, from_hex, sizeof(from_hex));
-    tb_addr_to_hex(&cfg.safe, to_hex, sizeof(to_hex));
-    {
-        char *p = data_hex;
-        p += sprintf(p, "0x");
-        for (size_t i = 0; i < exec_len; i++)
-            p += sprintf(p, "%02x", exec_buf[i]);
-        snprintf(params, sizeof(params),
-                 "[{\"from\":\"%s\",\"to\":\"%s\",\"data\":\"%s\"}]",
-                 from_hex, to_hex, data_hex);
-    }
-    uint64_t gas_est = 0;
-    if (rpc_u64_hex(h, &cfg, "eth_estimateGas", params, &gas_est, err) != 0)
-        return -1;
-
-    uint64_t gas =
-        cfg.gas_limit ? cfg.gas_limit : gas_est + gas_est / 3 + 30000;
-
-    /* SafeTx-хеш и подпись владельца-бота */
-    uint8_t stx[32], sig[65];
-    tb_safe_tx_hash(&cfg, to, value, data, data_len, safe_nonce, stx, err);
-    if (tb_safe_sign(&cfg, stx, sig, err) != 0)
-        return -1;
-
-    exec_len = tb_safe_build_exec_tx(exec_buf, sizeof(exec_buf), to, value,
-                                     data, data_len, sig);
-    if (!exec_len)
-        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW,
-                      "exec: calldata+sig");
-
-    tb_tx1559_t tx = {
-        .chain_id = chain,
-        .nonce = 0,
-        .max_priority_fee = prio,
-        .max_fee = gas_price + prio,
-        .gas_limit = gas,
-        .to = cfg.safe, /* execTransaction вызывается НА контракте Safe */
-        .value = 0,
-        .data = exec_buf,
-        .data_len = exec_len,
-    };
-
-    char acct_params[128];
-    snprintf(acct_params, sizeof(acct_params), "[\"%s\",\"pending\"]",
-             from_hex);
-    if (rpc_u64_hex(h, &cfg, "eth_getTransactionCount", acct_params,
-                    &tx.nonce, err) != 0)
-        return -1;
-
-    static char raw[4 + 2 * (1024 + 65536) + 3];
-    if (tb_tx1559_sign(&cfg.key, &tx, raw, sizeof(raw), tx_hash, NULL,
-                       err) != 0)
-        return -1;
-
-    static char send_params[140000];
-    snprintf(send_params, sizeof(send_params), "[\"%s\"]", raw);
-    char res[80];
-    rpc_resp_owner_t owner = {0};
-    if (rpc_call(h, &cfg, "eth_sendRawTransaction", send_params, res,
-                 sizeof(res), &owner, err) != 0)
-        return -1;
-    free(owner.resp);
-
-    if (strlen(res) != 66)
-        TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
-                      "sendRaw: хеш невалиден: '%.16s'", res);
-    for (int i = 0; i < 32; i++)
-        sscanf(res + 2 + i * 2, "%2hhx", &tx_hash[i]);
-    return 0;
-}
