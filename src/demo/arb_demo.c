@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h> /* mkdir: каталог предложений live */
 #include <unistd.h>
 
 #include "tb/arch/arch.h"
@@ -399,10 +400,52 @@ typedef struct app {
     tb_webui_t        *web;
     tb_arb_t          *arb;
     tb_exec_engine_t  *engine;
+    tb_ledger_t       *ledger; /* заимствован: журнал предложений */
     tb_u256_t          start_weth;
     const tb_arb_cfg_t *cfg;
     uint64_t           started_ms;
 } app_t;
+
+/* ---- Предложения SafeTx (propose-only, P0): артефакт для человека ----
+ * Консоль + JSON-файл proposals/ + запись журнала. Вызывается из потока
+ * submit (колбэк бэкенда) и со старта (approve). */
+static void emit_safe_proposal(app_t *d, const tb_safe_proposal_t *p,
+                               const char *event_type)
+{
+    char json[1600];
+    if (!tb_safe_proposal_json(p, json, sizeof(json)))
+        return;
+
+    char path[128];
+    snprintf(path, sizeof(path), "proposals/%llu-%llu.json",
+             (unsigned long long)p->safe_nonce,
+             (unsigned long long)p->created_ms);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fputs(json, f);
+        fclose(f);
+    }
+
+    char h[67];
+    h[0] = '0';
+    h[1] = 'x';
+    for (int i = 0; i < 32; i++)
+        sprintf(h + 2 + i * 2, "%02x", p->safe_tx_hash[i]);
+    printf("ПРЕДЛОЖЕНИЕ %s: nonce=%llu hash=%s\n  файл %s — проверь "
+           "параметры (min_out внутри calldata) и подпиши в Safe UI\n",
+           event_type, (unsigned long long)p->safe_nonce, h, path);
+    fflush(stdout);
+
+    if (d->ledger) {
+        tb_error_t lerr = TB_ERROR_INIT;
+        tb_ledger_emit(d->ledger, event_type, json, NULL, NULL, &lerr);
+    }
+}
+
+static void on_dex_proposal(const tb_safe_proposal_t *p, void *user)
+{
+    emit_safe_proposal(user, p, "safe.proposal.trade");
+}
 
 static app_t g_app;
 
@@ -595,7 +638,7 @@ static void web_update_task(tb_loop_t *loop, tb_task_t *task, void *arg)
     char mode[24];
     snprintf(mode, sizeof(mode), "%s%s",
              d->replay ? "replay" : "live-котировки",
-             d->cfg->dex.live ? " + Safe" : "");
+             d->cfg->dex.live ? " + Safe propose" : "");
     char json[2048];
     snprintf(json, sizeof(json),
              "{\"mode\":\"%s\",\"uptime_ms\":%llu,\"cards\":["
@@ -838,6 +881,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "журнал: %s\n", err.message);
         return 1;
     }
+    app.ledger = ledger;
 
     /* ---- веб-морда: поднимаем ДО медленных стартерных eth_call —
      * страница отвечает сразу («котировок ещё нет»), данные подтянутся
@@ -889,6 +933,10 @@ int main(int argc, char **argv)
     }
 
     /* ---- бэкенд исполнения (движок); котировщик — свой внутри tb_arb ---- */
+    /* propose-only: бэкенд отдаёт предложения сюда (консоль+файл+журнал) */
+    cfg.dex.on_propose = on_dex_proposal;
+    cfg.dex.propose_user = &app;
+
     tb_exec_backend_t dexb_exec;
     if (tb_exec_dex_init(&dexb_exec, http, &cfg.dex, &err) != 0) {
         fprintf(stderr, "dex-бэкенд: %s\n", err.message);
@@ -942,8 +990,8 @@ int main(int argc, char **argv)
     ecfg.br_cooldown_ms = 1500;
     ecfg.backoff_base_ms = 200;
     ecfg.backoff_cap_ms = 1200;
-    ecfg.fill_poll_max = live_exec ? 120 : 6;          /* реальная tx:
-                                                          до 2 минут */
+    ecfg.fill_poll_max = live_exec ? 1800 : 6; /* предложение: окно
+                                                  наблюдения 30 минут */
     ecfg.fill_poll_interval_ms = live_exec ? 1000 : 250;
     ecfg.max_slippage_bp = 150;
     ecfg.min_deadline_ahead_ms = 200;
@@ -972,6 +1020,44 @@ int main(int argc, char **argv)
             fprintf(stderr,
                     "live: на Safe нет WETH — пополните контракт\n");
             return 1;
+        }
+
+        /* P0: allowance WETH->роутер. Не хватает рабочего лимита —
+         * ПРЕДЛОЖЕНИЕ approve человеку (бот ничего не исполняет сам).
+         * Лимит ограниченный: max_trade x TB_SAFE_APPROVE_MULT. */
+        mkdir("proposals", 0755); /* артефакты; ошибка EEXIST не важна */
+        tb_error_t aerr = TB_ERROR_INIT;
+        tb_u256_t allow;
+        if (tb_safe_allowance(http, &cfg.dex.safe, &cfg.weth,
+                              &cfg.dex.safe.safe, &cfg.dex.safe.router,
+                              &allow, &aerr) == 0) {
+            tb_u256_t want = tb_u256_from_u64(cfg.max_trade_wei);
+            (void)tb_u256_mul_u64(&want, &want, TB_SAFE_APPROVE_MULT);
+            if (tb_u256_cmp(&allow, &want) < 0) {
+                uint8_t cd[4 + 64];
+                size_t cd_len = tb_safe_build_approve(
+                    cd, sizeof(cd), &cfg.dex.safe.router, &want);
+                tb_safe_proposal_t prop;
+                tb_error_t perr = TB_ERROR_INIT;
+                if (cd_len
+                    && tb_safe_propose_exec(http, &cfg.dex.safe, &cfg.weth,
+                                            0, cd, cd_len, tb_now_ms(),
+                                            &prop, &perr) == 0) {
+                    emit_safe_proposal(&app, &prop,
+                                       "safe.proposal.approve");
+                    printf("live: до approve сделки будут ревертиться "
+                           "на transferFrom — подпиши approve первым\n");
+                } else {
+                    fprintf(stderr, "approve-предложение: %s\n",
+                            perr.message);
+                }
+            }
+        } else {
+            fprintf(stderr,
+                    "allowance WETH->роутер не прочитан: %s\n"
+                    "  (проверь approve вручную — иначе сделки "
+                    "ревертнутся)\n",
+                    aerr.message);
         }
     }
     tb_wallet_deposit(wallet, &cfg.weth, &start, &err);
