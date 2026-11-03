@@ -30,6 +30,10 @@ typedef struct curve {
     uint64_t threshold; /* 0 — без порога */
     uint64_t x_below, x_above;
     uint64_t decay_num, decay_den; /* 0 — без затухания */
+    /* ступенчатые окна: amt < b[0] -> m[0]; b[k] <= amt < b[k+1] ->
+     * m[k+1]; amt >= b[n-1] -> m[n] (для разрозненных интервалов) */
+    uint64_t steps[8], mults[9];
+    int      steps_n;
     int      fail_after; /* после N вызовов — ошибка; 0 = без ошибок */
     int      calls;
 } curve_t;
@@ -59,6 +63,12 @@ static int synth_quote(void *ctx, const tb_addr_t *pool, uint32_t fee,
         mult = c->x_above > amt * c->decay_num / c->decay_den
                    ? c->x_above - amt * c->decay_num / c->decay_den
                    : 0;
+    if (c->steps_n > 0) {
+        mult = c->mults[0];
+        for (int k = 0; k < c->steps_n; k++)
+            if (amt >= c->steps[k])
+                mult = c->mults[k + 1];
+    }
     out->w[0] = amt * mult * c->snum / (c->sden * 100);
     out->w[1] = out->w[2] = out->w[3] = 0;
     return 0;
@@ -202,6 +212,27 @@ int main(void)
         CHECK(!r.ok);
         CHECK(strstr(r.reason, "нет прибыли") != NULL);
         CHECK(r.gas_cost_wei == 100000); /* газ пары, не конфига */
+    }
+
+    /* ---- 6b. ДВА разрозненных прибыльных окна: глобальная сетка
+     *      обязана найти оба; вход первого, максимум лучшего ---- */
+    {
+        tb_arb_cfg_t c = mk_cfg();
+        /* окна: [2000,5000) x115% | (5000,20000) x98% |
+         *        [20000,100000) x105% | >100000 x95% */
+        curve_t cv = { .num = 10, .den = 10, .snum = 100, .sden = 100,
+                       .steps = { 2000, 5000, 20000, 100000 },
+                       .mults = { 99, 115, 98, 105, 95 },
+                       .steps_n = 4 };
+        CHECK(tb_arb_eval_pair(&c, &p, synth_quote, &cv, &r, &err) == 1);
+        CHECK(r.ok);
+        /* вход — граница ПЕРВОГО окна (~2000, не ~20000) */
+        CHECK(r.size.w[0] >= 2000);
+        CHECK(r.size.w[0] <= 2100);
+        /* максимум — во ВТОРОМ окне: сетке нельзя застрять в первом */
+        CHECK(r.opt_size.w[0] > 50000);
+        CHECK(r.opt_size.w[0] < 110000);
+        CHECK(r.opt_profit.w[0] > 4000); /* ~5% от ~100к за вычетом */
     }
 
     /* ---- 7. Живой газ в норме: расчёт по нему, не по фолбэку ---- */
