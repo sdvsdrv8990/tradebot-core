@@ -90,7 +90,9 @@ static void rlp_put(tb_rlp_t *r, const uint8_t *p, size_t n)
         r->overflow = true;
         return;
     }
-    memcpy(r->buf + r->len, p, n);
+    if (n)
+        memcpy(r->buf + r->len, p, n); /* n==0 с p==NULL — UB по
+                                        * стандарту (UBSan прав) */
     r->len += n;
 }
 
