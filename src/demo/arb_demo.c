@@ -1178,6 +1178,9 @@ int main(int argc, char **argv)
 
     /* ---- обновление страниц морды: конвейер жив, данные пойдут ---- */
     app.arb = arb;
+    g_app.arb = arb; /* обработчик сигнала сворачивает воркеры конвейера;
+                      * прежде поле не присваивалось — Ctrl+C не до-
+                      * останавливал арбитраж (нашёл stop-storm H1.3) */
     app.engine = engine;
     app.cfg = &cfg;
     app.start_weth = start;

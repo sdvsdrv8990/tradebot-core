@@ -265,7 +265,12 @@ int tb_loop_run(tb_loop_t *loop)
         return -1;
     }
     tb_atomic_store_bool(&loop->running, true);
-    tb_atomic_store_bool(&loop->stop_requested, false);
+    /* stop_requested НЕ сбрасываем: сигнал остановки мог прийти после
+     * создания цикла, но ДО входа в run (стартовые проверки идут
+     * долго) — прежний сброс превращал его в вечный цикл (дедлок
+     * пойман stop-storm тестом H1.3). Начальное значение false —
+     * штатный запуск не отличается; остановленный до старта цикл
+     * выходит немедленно */
 
     int rc = 0;
     while (!tb_atomic_load_bool(&loop->stop_requested)) {

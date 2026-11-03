@@ -97,6 +97,10 @@ static int arb_quote_dir(tb_arb_t *a, const tb_addr_t *pool, uint32_t fee,
  *  Фаза 1: батч снапшотов
  * ========================================================================== */
 
+struct decide_job; /* fwd: батч владеет решающей джобой (объявлена ниже) */
+static void decide_release(struct decide_job *d); /* free с мьютексом:
+                                                    * полный тип ниже */
+
 typedef struct arb_batch {
     tb_arb_t       *a;
     uint64_t        seq;
@@ -144,8 +148,10 @@ static void batch_release(arb_batch_t *b)
                    + __atomic_load_n(&b->eval_slots, __ATOMIC_ACQUIRE);
     if (r == total) {
         /* сплиттер принадлежит батчу: комбинер читает его данные на
-         * потоке цикла ПОСЛЕ dtor-а сплиттера — раньше freeing нельзя */
-        free(b->decide);
+         * потоке цикла ПОСЛЕ dtor-а сплиттера — раньше freeing нельзя.
+         * Мьютекс кеша хопов жив до сих пор: оценщики заканчиваются
+         * не раньше своих релизов (decide_quote только в eval_work) */
+        decide_release(b->decide);
         free(b);
     }
 }
@@ -348,6 +354,17 @@ typedef struct decide_job {
         uint64_t pairs_evaluated, pairs_profitable;
     } st;
 } decide_job_t;
+
+/* Освобождение решающей джобы: мьютекс кеша хопов живёт ДО сих пор
+ * (оценщики заканчиваются не раньше своих релизов батча) */
+static void decide_release(struct decide_job *d)
+{
+    if (!d)
+        return;
+    pthread_mutex_destroy(&d->hops_lock);
+    free(d);
+}
+
 
 /* ---- оценка среза пар: контекст и интерфейс (сплиттер раздаёт) ---- */
 struct eval_job {
@@ -721,9 +738,10 @@ static void decide_done(tb_loop_t *loop, void *arg)
 static void decide_dtor(void *arg)
 {
     decide_job_t *d = arg;
-    pthread_mutex_destroy(&d->hops_lock);
-    /* сама джоба принадлежит батчу (b->decide): комбинер читает её
-     * данные и после нашего dtor — освобождение в batch_release */
+    /* мьютекс НЕ трогаем: порядок dtor-ов сплиттера и оценщиков при
+     * остановке не гарантирован (done-постинги отклоняются, dtor-ы
+     * идут из воркеров) — оценщик может быть ещё в decide_quote.
+     * Разрушает batch_release вместе с decide_job (последний релиз) */
     batch_release(d->batch);
 }
 
