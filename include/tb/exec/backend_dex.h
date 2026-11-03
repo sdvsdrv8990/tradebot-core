@@ -117,6 +117,13 @@ void tb_exec_dex_set_quote_block(uint64_t block);
 int tb_exec_dex_block_number(tb_http_t *http, const tb_exec_dex_venue_t *v,
                              uint64_t *block, tb_error_t *err);
 
+/* Цена газа через RPC venue: eth_gasPrice + приоритетная премия
+ * (eth_maxPriorityFeePerGas; узел не отдал — премия 0, не ошибка).
+ * *price_wei — сумма base+priority, как maxFeePerGas живой отправки.
+ * 0 — успех; ошибка — вызывающий деградирует на конфиг-оценку. */
+int tb_exec_dex_gas_price(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                          uint64_t *price_wei, tb_error_t *err);
+
 /* Проверка пула на цепи: V3 — Factory.getPool(tokenA, tokenB, fee),
  * V2 — Factory.getPair(tokenA, tokenB); адрес с цепи обязан совпасть с
  * expect_pool (конфиг — ожидание, цепь — истина).

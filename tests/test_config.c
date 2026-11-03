@@ -120,7 +120,8 @@ int main(void)
     tb_arb_defaults(&z);
     CHECK(z.poll_ms == 8000);
     CHECK(z.max_trade_wei == 10000000000000000ull); /* верх контракта */
-    CHECK(z.min_trade_wei == 100000000000000ull);
+    CHECK(z.min_trade_wei == 0); /* пол поиска выводит движок (P1);
+                                  * ручное значение не навязывается */
     CHECK(z.min_profit_wei == 10000000000000ull);
     CHECK(z.gas_est_wei == 200000000000000ull);
     CHECK(z.deadline_ms == 8000);

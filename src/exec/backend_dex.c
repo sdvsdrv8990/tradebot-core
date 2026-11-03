@@ -816,6 +816,37 @@ int tb_exec_dex_block_number(tb_http_t *http, const tb_exec_dex_venue_t *v,
     return 0;
 }
 
+int tb_exec_dex_gas_price(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                          uint64_t *price_wei, tb_error_t *err)
+{
+    char result[80];
+    if (rpc_result(http, v,
+                   "{\"jsonrpc\":\"2.0\",\"method\":\"eth_gasPrice\","
+                   "\"params\":[],\"id\":1}",
+                   result, sizeof(result), err) != 0)
+        return -1;
+    size_t len = strlen(result);
+    if (len < 3 || result[0] != '0' || result[1] != 'x')
+        TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                      "eth_gasPrice: некорректный результат '%.32s'",
+                      result);
+    uint64_t base = strtoull(result + 2, NULL, 16);
+
+    /* приоритетная премия опциональна: не все узлы дают метод */
+    uint64_t prio = 0;
+    tb_error_t perr = TB_ERROR_INIT;
+    if (rpc_result(http, v,
+                   "{\"jsonrpc\":\"2.0\",\"method\":"
+                   "\"eth_maxPriorityFeePerGas\",\"params\":[],\"id\":1}",
+                   result, sizeof(result), &perr) == 0
+        && strlen(result) > 2 && result[0] == '0' && result[1] == 'x')
+        prio = strtoull(result + 2, NULL, 16);
+
+    unsigned __int128 total = (unsigned __int128)base + prio;
+    *price_wei = total >> 64 ? UINT64_MAX : (uint64_t)total;
+    return 0;
+}
+
 int tb_exec_dex_verify_pool(tb_http_t *http, const tb_exec_dex_venue_t *v,
                             const tb_addr_t *token_a, const tb_addr_t *token_b,
                             uint32_t fee, const tb_addr_t *expect_pool,

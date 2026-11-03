@@ -251,7 +251,6 @@
   "decision": {
     "poll_ms": 15000,
     "probe_wei": "100000000000000",
-    "min_trade_wei": "100000000000000",
     "max_trade_wei": "10000000000000000",
     "min_profit_wei": "10000000000000",
     "gas_est_wei": "200000000000000",
