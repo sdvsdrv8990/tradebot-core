@@ -401,6 +401,10 @@ static void decide_work(void *arg)
                 continue;
             if (d->batch->snaps[i].block != d->batch->snaps[j].block)
                 continue;
+            /* блок неизвестен (0 — eth_blockNumber не донёсся): latest
+             * каждого пула — разные состояния цепи, сравнивать нельзя */
+            if (d->batch->snaps[i].block == 0)
+                continue;
             /* перекотировки решения — на блоке цепи пары; газ цикла —
              * цена газа той же цепи × Units (P1: живой газ, не конфиг).
              * Не достали — 0, движок решения возьмёт gas_est_wei */
@@ -570,11 +574,15 @@ static void emit_evaluated(tb_arb_t *a, arb_batch_t *b, decide_job_t *d)
         tb_u256_to_dec(&e->r.sell_out, so, sizeof(so));
         tb_u256_to_dec(&e->r.opt_size, os, sizeof(os));
         tb_u256_to_dec(&e->r.opt_profit, opf, sizeof(opf));
+        bool same_dex =
+            strcmp(b->snaps[e->buy_i].dex, b->snaps[e->sell_i].dex) == 0;
         APPEND("%s{\"buy\":\"%s\",\"sell\":\"%s\",\"ok\":%s,"
+               "\"same_dex\":%s,"
                "\"size\":\"%s\",\"sell_out\":\"%s\",\"opt_size\":\"%s\","
                "\"opt_profit_wei\":\"%s\",\"gas_cost_wei\":%llu,"
                "\"probes\":%u,\"reason\":\"%s\"}",
-               k ? "," : "", bp, sp, e->r.ok ? "true" : "false", sz, so,
+               k ? "," : "", bp, sp, e->r.ok ? "true" : "false",
+               same_dex ? "true" : "false", sz, so,
                os, opf, (unsigned long long)e->r.gas_cost_wei,
                e->r.probes, e->r.reason);
     }
@@ -634,10 +642,30 @@ static void decide_done(tb_loop_t *loop, void *arg)
 
     uint32_t budget =
         a->cfg.max_pairs_per_poll ? a->cfg.max_pairs_per_poll : 1;
-    for (size_t k = 0; k < d->results_n && budget > 0; k++) {
-        struct res_ent *e = &d->results[k];
-        if (!e->r.ok || a->pending_n >= TB_ARB_MAX_PENDING)
+
+    /* порядок подачи — по максимуму расчётной чистой прибыли (P2):
+     * раньше побеждала первая ok-пара по порядку пулов, а не лучшая */
+    size_t order[TB_ARB_MAX_RESULTS];
+    size_t order_n = 0;
+    for (size_t k = 0; k < d->results_n; k++) {
+        if (!d->results[k].r.ok)
             continue;
+        size_t pos = order_n;
+        while (pos > 0 && tb_u256_cmp(&d->results[k].r.opt_profit,
+                                      &d->results[order[pos - 1]].r
+                                           .opt_profit) > 0) {
+            order[pos] = order[pos - 1];
+            pos--;
+        }
+        order[pos] = k;
+        order_n++;
+    }
+
+    for (size_t oi = 0; oi < order_n && budget > 0; oi++) {
+        size_t k = order[oi];
+        struct res_ent *e = &d->results[k];
+        if (a->pending_n >= TB_ARB_MAX_PENDING)
+            break;
         budget--;
 
         /* ставка — оптимум кривой прибыли (фаза B), не минимум */
@@ -1208,7 +1236,8 @@ tb_arb_t *tb_arb_create(const tb_arb_cfg_t *cfg, tb_exec_engine_t *engine,
     if (a->cfg.dex.venues_n > 0 && a->cfg.pools_n > 0) {
         tok_job_t *tjobs = calloc(a->cfg.pools_n, sizeof(*tjobs));
         if (tjobs) {
-            /* уникальные токены (адрес+цепь), хаб не спрашиваем */
+            /* уникальные токены (адрес+цепь), хаб не спрашиваем;
+             * уже засеянные из листа активов — RPC не тратим */
             size_t unique = 0;
             for (uint32_t i = 0; i < a->cfg.pools_n; i++) {
                 const tb_addr_t *t = &a->cfg.pools[i].token;

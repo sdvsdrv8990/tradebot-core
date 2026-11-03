@@ -563,7 +563,8 @@ static const char VENUES_JS[] =
     "href=\"https://etherscan.io/token/'+p.token"
     "+'\" target=\"_blank\" rel=\"noreferrer\">'+esc(p.symbol||"
     "short(p.token))+'</a>',"
-    "dexCell(p.buy),dexCell(p.sell),"
+    "dexCell(p.buy),dexCell(p.sell)"
+    "+(p.same_dex?' <span class=\"tag\">кросс-тир</span>':''),"
     "'<span style=\"color:'+(p.spread_bp>0?'#5dd39e':'#7b8494')+'\">'"
     "+bp(p.spread_bp)+'</span>',"
     "eth(p.profit_est)]);"
@@ -637,7 +638,8 @@ static void web_update_task(tb_loop_t *loop, tb_task_t *task, void *arg)
     tb_u256_to_dec(profit ? &pnl : &zero, pnl_s, sizeof(pnl_s));
     char mode[24];
     snprintf(mode, sizeof(mode), "%s%s",
-             d->replay ? "replay" : "live-котировки",
+             d->replay ? "replay-синтетика (спред вшит в mock)"
+                       : "live-котировки",
              d->cfg->dex.live ? " + Safe propose" : "");
     char json[2048];
     snprintf(json, sizeof(json),
@@ -861,7 +863,8 @@ int main(int argc, char **argv)
         cfg.deadline_ms = 4000;
         cfg.dex.fill_delay_min_ms = 150;
         cfg.dex.fill_delay_max_ms = 300;
-        printf("режим replay: mock-RPC 127.0.0.1:%u, спред тиров ~0.7%%\n",
+        printf("режим replay: mock-RPC 127.0.0.1:%u — рынок СИНТЕТИЧЕСКИЙ "
+               "(спред тиров ~0.7%% вшит в mock; живые данные не используются)\n",
                (unsigned)app.mock.port);
     }
 

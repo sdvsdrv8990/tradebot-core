@@ -64,6 +64,7 @@ static void mk_cfg(tb_arb_cfg_t *cfg)
 #define POOL_UNI_USDC_500 "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
 #define POOL_UNI_USDC_3000 "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8"
 #define POOL_UNI_USDT_500 "0x11b815efb8f581194ae79006d24e0d814b7697f6"
+#define POOL_PAN_USDC_500 "0x1ac1a8feaaea1900c4166deeed0c11cc10669d36"
 
 static void test_pair_fresh_same_block(void)
 {
@@ -161,12 +162,14 @@ static void test_different_blocks_excluded(void)
                              sizeof(json)) == 0);
     CHECK(strstr(json, "\"spread_bp\"") == NULL); /* В6: не сравниваем */
 
-    /* блоки неизвестны (0, оффлайн) — сравнение разрешено */
+    /* блоки неизвестны (0) — latest каждого пула разные состояния
+     * цепи: сравнение ЗАПРЕЩЕНО (P2; прежде 0==0 молча сравнивалось —
+     * противоречило собственному комментарию кода) */
     snaps[0].block = 0;
     snaps[1].block = 0;
     CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
                              sizeof(json)) == 0);
-    CHECK(strstr(json, "\"spread_bp\":50") != NULL);
+    CHECK(strstr(json, "\"spread_bp\"") == NULL);
 }
 
 /* Публикация батча: свежесть пар/пулов от pub_ms, не от ts_ms сбора.
@@ -313,12 +316,58 @@ static void test_validator(void)
     CHECK(tb_arb_cfg_validate(&cfg, &err) != 0);
 }
 
+static void test_block0_excluded(void)
+{
+    /* блок неизвестен (0) — latest каждого пула разные состояния цепи,
+     * пара не собирается (P2: прежний код сравнивал 0==0) */
+    tb_arb_cfg_t cfg;
+    mk_cfg(&cfg);
+    uint64_t now = tb_now_ms();
+    tb_arb_snap_t snaps[2];
+    snaps[0] = mk_snap(0, POOL_UNI_USDC_500, USDC_HEX, 500, "uniswap-v3",
+                       0, now - 100, 20000, "USDC");
+    snaps[1] = mk_snap(1, POOL_PAN_USDC_500, USDC_HEX, 500,
+                       "pancakeswap-v3", 0, now - 100, 21000, "USDC");
+    char json[4096];
+    CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
+                             sizeof(json)) == 0);
+    CHECK(strstr(json, "\"spread_bp\"") == NULL); /* пар нет */
+}
+
+static void test_same_dex_marked(void)
+{
+    /* пара одного DEX (кросс-тир) помечена same_dex — UI отличит её
+     * от межбиржевой */
+    tb_arb_cfg_t cfg;
+    mk_cfg(&cfg);
+    uint64_t now = tb_now_ms();
+    tb_arb_snap_t snaps[2];
+    snaps[0] = mk_snap(0, POOL_UNI_USDC_500, USDC_HEX, 500, "uniswap-v3",
+                       12345, now - 100, 20000, "USDC");
+    snaps[1] = mk_snap(1, POOL_UNI_USDC_3000, USDC_HEX, 3000, "uniswap-v3",
+                       12345, now - 100, 19900, "USDC");
+    char json[4096];
+    CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
+                             sizeof(json)) == 0);
+    CHECK(strstr(json, "\"spread_bp\":50") != NULL); /* пара собрана */
+    CHECK(strstr(json, "\"same_dex\":true") != NULL);
+
+    /* межбиржевая — false */
+    snaps[1] = mk_snap(1, POOL_PAN_USDC_500, USDC_HEX, 500,
+                       "pancakeswap-v3", 12345, now - 100, 19900, "USDC");
+    CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
+                             sizeof(json)) == 0);
+    CHECK(strstr(json, "\"same_dex\":false") != NULL);
+}
+
 int main(void)
 {
     test_pair_fresh_same_block();
     test_stale_snap_excluded();
     test_different_chains_excluded();
     test_different_blocks_excluded();
+    test_block0_excluded();
+    test_same_dex_marked();
     test_pub_freshness();
     test_route_quote_section();
     test_validator();
