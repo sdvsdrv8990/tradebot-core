@@ -31,8 +31,11 @@ static const int RHO[5][5] = {
 
 static inline uint64_t rotl64(uint64_t x, int n)
 {
+    /* n == 0: сдвиг на 64 (ширину типа) — UB; gcc «прощал», clang
+     * оптимизировал по предположению и портил хеш (CI Linux/clang:
+     * падали test_keccak/test_sign/test_backend_dex — селекторы) */
     n &= 63;
-    return (x << n) | (x >> (64 - n));
+    return n == 0 ? x : ((x << n) | (x >> (64 - n)));
 }
 
 static void keccakf(uint64_t A[25])
