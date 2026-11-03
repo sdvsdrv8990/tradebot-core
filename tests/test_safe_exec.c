@@ -262,6 +262,104 @@ int main(void)
         CHECK(strstr(js, "\"nonce\":5") != NULL);
     }
 
+    /* ---- 6. Полный live-цикл: гейт -> approve -> подпись -> trade ---
+     * ---- замена -> исполнение -> дельта; истечение ---- */
+    {
+        tb_exec_dex_cfg_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        strcpy(cfg.venues[0].name, "uni-test");
+        snprintf(cfg.venues[0].rpc_url, sizeof(cfg.venues[0].rpc_url),
+                 "http://127.0.0.1:%u", (unsigned)mock.port);
+        cfg.venues[0].quoter = A("0x61fFE014bA17989E743c5F6cB21bF9697530B21e");
+        cfg.venues[0].pools[0] = A("0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640");
+        cfg.venues[0].pools_n = 1;
+        cfg.venues_n = 1;
+        cfg.seed = 42;
+        cfg.live = true;
+        snprintf(cfg.safe.rpc_url, sizeof(cfg.safe.rpc_url),
+                 "http://127.0.0.1:%u", (unsigned)mock.port);
+        cfg.safe.safe = SAFE;
+        cfg.safe.router = ROUTER;
+        cfg.safe.chain_id = 1;
+        cfg.approve_cap_wei = 10000000000000000ull;
+        cfg.on_propose = catch_proposal;
+
+        tb_exec_backend_t b;
+        CHECK(tb_exec_dex_init(&b, http, &cfg, &err) == 0);
+
+        tb_addr_t usdc = A("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        tb_route_t r = tb_route_single(&WETH, &usdc, 500, &err);
+        tb_route_set_pool(&r, 0, &cfg.venues[0].pools[0]);
+        tb_u256_t in, mn, got;
+        tb_u256_from_dec(&in, "1000000000000000", 16, NULL);
+        tb_u256_from_dec(&mn, "900", 3, NULL);
+        uint64_t tx = 0;
+
+        /* 6a. allowance = 0: trade отказан, предложен approve */
+        g_prop_n = 0;
+        tb_error_t serr = TB_ERROR_INIT;
+        int rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got,
+                          &serr);
+        CHECK(rc == -1);
+        CHECK(strstr(serr.message, "allowance") != NULL);
+        CHECK(g_prop_n == 1);
+        CHECK(strcmp(g_props[0].kind, "approve") == 0);
+        CHECK(mock.sendraw_count == 0);
+
+        /* 6b. allowance всё ещё 0: approve уже жив — trade отказан
+         *     без повторного approve-предложения */
+        g_prop_n = 0;
+        rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
+        CHECK(rc == -1);
+        CHECK(g_prop_n == 0); /* повтор не нужен — тот же approve жив */
+
+        /* 6c. «человек подписал approve»: allowance вырос, nonce тоже */
+        mock.allowance = 2000000000000000000ull;
+        mock.safe_nonce = 6;
+        g_prop_n = 0;
+        rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
+        CHECK(rc == 1);
+        CHECK(tx != 0);
+        CHECK(g_prop_n == 1);
+        CHECK(strcmp(g_props[0].kind, "trade") == 0);
+        CHECK(g_props[0].safe_nonce == 6);
+        uint64_t tx1 = tx;
+
+        /* 6d. poll: nonce не двигался — ждём */
+        tb_error_t perr = TB_ERROR_INIT;
+        CHECK(b.poll(&b, tx1, tb_now_ms(), &got, &perr) == 1);
+
+        /* 6e. второе предложение до исполнения заменяет первое */
+        g_prop_n = 0;
+        rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
+        CHECK(rc == 1);
+        CHECK(g_prop_n == 1);
+        CHECK(g_props[0].safe_nonce == 6); /* тот же nonce */
+        uint64_t tx2 = tx;
+        tb_error_t oerr = TB_ERROR_INIT;
+        CHECK(b.poll(&b, tx1, tb_now_ms(), &got, &oerr) == -1);
+        CHECK(strstr(oerr.message, "заменено") != NULL);
+
+        /* 6f. «исполнение»: nonce вырос, баланс сместился */
+        mock.safe_nonce = 7;
+        mock.balance = 1500;
+        CHECK(b.poll(&b, tx2, tb_now_ms(), &got, &perr) == 0);
+        CHECK(got.w[0] == 500); /* дельта 1500-1000 */
+
+        /* 6g. истечение окна: отказ без цепи */
+        g_prop_n = 0;
+        rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
+        CHECK(rc == 1);
+        tb_error_t eerr = TB_ERROR_INIT;
+        CHECK(b.poll(&b, tx, tb_now_ms() + TB_SAFE_PROPOSAL_WATCH_MS + 1000,
+                     &got, &eerr)
+              == -1);
+        CHECK(strstr(eerr.message, "истекло") != NULL);
+        CHECK(mock.sendraw_count == 0); /* ни одной отправки за всё */
+
+        b.destroy(&b);
+    }
+
     tb_http_destroy(http);
     mock_stop(&mock);
     printf("OK test_safe_exec\n");

@@ -96,6 +96,9 @@ typedef struct tb_exec_dex_cfg {
     bool                live;
     tb_exec_dex_proposal_cb on_propose;
     void               *propose_user;
+    uint64_t            approve_cap_wei; /* рабочий лимит approve
+                                          * (max_trade x MULT); 0 ->
+                                          * approve ровно на ставку */
     tb_safe_cfg_t       safe;
 } tb_exec_dex_cfg_t;
 
@@ -113,6 +116,8 @@ typedef struct tb_exec_dex_stats {
     uint64_t submits;        /* submit-вызовов */
     uint64_t fills;          /* shadow-заполнений + live-расчётов */
     uint64_t proposals;      /* live: подготовлено предложений SafeTx */
+    uint64_t supersedes;     /* live: замен живого предложения */
+    uint64_t allowance_gates;/* live: trade не предложен из-за allowance */
 } tb_exec_dex_stats_t;
 const tb_exec_dex_stats_t *tb_exec_dex_stats(const tb_exec_backend_t *b);
 
