@@ -522,3 +522,89 @@ int tb_safe_allowance(tb_http_t *h, const tb_safe_cfg_t *c,
     return call_addr_method(h, c, SEL_ALLOWANCE, token, owner, spender, out,
                             err);
 }
+
+
+/* ---- Публикация в очередь Safe UI (Transaction Service) ----
+ * POST {service}/api/v1/safes/{safe}/multisig-transactions/ —
+ * предложение БЕЗ подписи: при пороге 1 одно подтверждение человека
+ * в интерфейсе = исполнение. 201/200 = в очереди. Ошибка — вызывающий
+ * деградирует на артефакт-файл, конвейер не останавливать. */
+int tb_safe_service_propose(tb_http_t *h, const tb_safe_cfg_t *c,
+                            const tb_safe_proposal_t *p, tb_error_t *err)
+{
+    if (!h || !c || !p || !c->tx_service_url[0])
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                      "service: url не задан");
+
+    char safe_h[43], to_h[43], data_h[2 + 512 * 2 + 1];
+    tb_addr_to_hex(&p->safe, safe_h, sizeof(safe_h));
+    tb_addr_to_hex(&p->to, to_h, sizeof(to_h));
+    data_h[0] = '0';
+    data_h[1] = 'x';
+    for (size_t i = 0; i < p->data_len; i++)
+        sprintf(data_h + 2 + i * 2, "%02x", p->data[i]);
+    data_h[2 + p->data_len * 2] = '\0';
+
+    char url[TB_HTTP_URL_MAX + 96];
+    snprintf(url, sizeof(url),
+             "%s/api/v1/safes/%s/multisig-transactions/",
+             c->tx_service_url, safe_h);
+
+    static char body[140000];
+    int n = snprintf(body, sizeof(body),
+                     "{\"to\":\"%s\",\"value\":\"%llu\","
+                     "\"data\":\"%s\",\"operation\":0,"
+                     "\"safeTxGas\":\"0\",\"baseGas\":\"0\","
+                     "\"gasPrice\":\"0\","
+                     "\"gasToken\":\"0x0000000000000000000000000000000000"
+                     "000000\",\"refundReceiver\":\"0x00000000000000000000"
+                     "00000000000000000000\",\"nonce\":%llu,"
+                     "\"origin\":\"tradebot-core %s\"}",
+                     to_h, (unsigned long long)p->value, data_h,
+                     (unsigned long long)p->safe_nonce, p->kind);
+    if (n < 0 || (size_t)n >= sizeof(body))
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW,
+                      "service: тело запроса");
+
+    tb_http_req_t req = { 0 };
+    strcpy(req.method, "POST");
+    snprintf(req.url, sizeof(req.url), "%s", url);
+    req.body = body;
+    req.body_len = (size_t)n;
+    req.timeout_ms = c->timeout_ms ? c->timeout_ms : 10000;
+
+    tb_http_resp_t *resp = calloc(1, sizeof(*resp));
+    if (!resp)
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "service");
+
+    int rc = -1;
+    if (tb_http_request(h, &req, resp, err) != 0) {
+        TB_ERROR_PROMOTE(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                         "service: транспорт");
+        goto out;
+    }
+    if (resp->status == 201 || resp->status == 200) {
+        rc = 0; /* в очереди */
+        goto out;
+    }
+    {
+        resp->body[resp->body_len < TB_HTTP_BODY_MAX ? resp->body_len
+                                                     : TB_HTTP_BODY_MAX - 1]
+            = '\0';
+        size_t mlen = 0;
+        const char *msg = NULL;
+        /* без JSON-парсера: короткий срез неформатированного ответа */
+        msg = resp->body;
+        mlen = strlen(msg);
+        if (mlen > 160)
+            mlen = 160;
+        char mbuf[192];
+        memcpy(mbuf, msg, mlen);
+        mbuf[mlen] = '\0';
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "service: HTTP %ld: %.160s", (long)resp->status, mbuf);
+    }
+out:
+    free(resp);
+    return rc;
+}

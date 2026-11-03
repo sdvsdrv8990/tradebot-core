@@ -262,6 +262,25 @@ int main(void)
         CHECK(strstr(js, "\"nonce\":5") != NULL);
     }
 
+    /* ---- 5. Публикация в очередь (service, мок на том же порту) ---- */
+    {
+        tb_safe_cfg_t cfg = {0};
+        snprintf(cfg.rpc_url, sizeof(cfg.rpc_url), "http://127.0.0.1:%u",
+                 (unsigned)mock.port);
+        snprintf(cfg.tx_service_url, sizeof(cfg.tx_service_url),
+                 "http://127.0.0.1:%u", (unsigned)mock.port);
+        cfg.safe = SAFE;
+
+        tb_safe_proposal_t p;
+        uint8_t cd[4] = { 0x09, 0x5e, 0xa7, 0xb3 };
+        CHECK(tb_safe_propose_exec(http, &cfg, &WETH, 0, cd, sizeof(cd),
+                                   tb_now_ms(), &p, &err)
+              == 0);
+        int posts = mock.service_posts;
+        CHECK(tb_safe_service_propose(http, &cfg, &p, &err) == 0);
+        CHECK(mock.service_posts == posts + 1); /* POST /api/v1 был */
+    }
+
     /* ---- 6. Полный live-цикл: гейт -> approve -> подпись -> trade ---
      * ---- замена -> исполнение -> дельта; истечение ---- */
     {

@@ -401,6 +401,7 @@ typedef struct app {
     tb_arb_t          *arb;
     tb_exec_engine_t  *engine;
     tb_ledger_t       *ledger; /* заимствован: журнал предложений */
+    tb_http_t         *http_for_proposals; /* транспорт публикации */
     tb_u256_t          start_weth;
     const tb_arb_cfg_t *cfg;
     uint64_t           started_ms;
@@ -439,6 +440,26 @@ static void emit_safe_proposal(app_t *d, const tb_safe_proposal_t *p,
     if (d->ledger) {
         tb_error_t lerr = TB_ERROR_INIT;
         tb_ledger_emit(d->ledger, event_type, json, NULL, NULL, &lerr);
+    }
+
+    /* очередь Safe UI (Transaction Service): предложение появляется в
+     * app.safe.global; при пороге 1 одно подтверждение = исполнение.
+     * Ошибка сервиса не ломает конвейер — артефакт уже записан. */
+    if (d->cfg && d->cfg->dex.safe.tx_service_url[0]) {
+        tb_error_t serr = TB_ERROR_INIT;
+        if (tb_safe_service_propose(d->http_for_proposals,
+                                    &d->cfg->dex.safe, p,
+                                    &serr) == 0) {
+            char safe_h[43];
+            tb_addr_to_hex(&p->safe, safe_h, sizeof(safe_h));
+            printf("  в очереди Safe UI: https://app.safe.global/"
+                   "eth:%s/transactions/queue\n",
+                   safe_h);
+        } else {
+            fprintf(stderr, "  сервис очереди недоступен: %s "
+                            "(артефакт-файл действителен)\n",
+                    serr.message);
+        }
     }
 }
 
@@ -901,9 +922,12 @@ int main(int argc, char **argv)
     }
 
     /* ---- бэкенд исполнения (движок); котировщик — свой внутри tb_arb ---- */
-    /* propose-only: бэкенд отдаёт предложения сюда (консоль+файл+журнал) */
+    /* propose-only: бэкенд отдаёт предложения сюда (консоль+файл+журнал
+     * + очередь Safe UI); allowance-гейт бэкенда знает рабочий лимит */
+    app.http_for_proposals = http;
     cfg.dex.on_propose = on_dex_proposal;
     cfg.dex.propose_user = &app;
+    cfg.dex.approve_cap_wei = cfg.max_trade_wei * TB_SAFE_APPROVE_MULT;
 
     tb_exec_backend_t dexb_exec;
     if (tb_exec_dex_init(&dexb_exec, http, &cfg.dex, &err) != 0) {
