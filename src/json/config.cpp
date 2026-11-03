@@ -373,8 +373,8 @@ extern "C" void tb_arb_defaults(tb_arb_cfg_t *cfg)
         cfg->poll_ms = 8000;
     if (cfg->probe_wei == 0)
         cfg->probe_wei = 100000000000000ull;
-    if (cfg->min_trade_wei == 0)
-        cfg->min_trade_wei = 100000000000000ull;
+    /* min_trade_wei НЕ дефолтим: 0 = точку безубыточности ищет движок
+     * от TB_ARB_SIZE_FLOOR_WEI; явное значение — ручной пол поиска */
     if (cfg->max_trade_wei == 0)
         cfg->max_trade_wei = 10000000000000000ull;
     if (cfg->min_profit_wei == 0)

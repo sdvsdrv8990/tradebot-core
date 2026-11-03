@@ -6,12 +6,18 @@
  *  приходят через колбэк tb_arb_quote_fn: тесты гоняют синтетические
  *  кривые, живой режим — QuoterV2 через tb_dex.
  *
- *  Математика («тупая и надёжная»):
- *    profit(size) = sell(size) − size − gas_est − min_profit,
- *  где sell(size) — точная цепная котировка WETH -> TOKEN -> WETH через
- *  пулы двух бирж (комиссии и влияние уже в числах Quoter). Ищем
- *  МИНИМАЛЬНЫЙ size из [min_trade, верх контракта], при котором
- *  profit > 0; верх контракта = max_trade (безопасный потолок).
+ *  Математика: газ и порог — НЕ настройки прибыльности.
+ *    gas_cost = цена газа с цепи (eth_gasPrice+priority, на батч) ×
+ *    TB_ARB_GAS_UNITS (константа формы транзакции); конфиг gas_est_wei —
+ *    только фолбэк, когда RPC не ответил.
+ *    required(size) = min_profit_wei + size × TB_ARB_RISK_BP/10000
+ *    (абсолютный защитный минимум + буфер исполнения от размера).
+ *    profit(size) = sell(size) − size − gas_cost − required(size),
+ *  где sell(size) — точная цепная котировка WETH -> TOKEN -> WETH (комиссии
+ *  и влияние уже внутри чисел Quoter). Поиск ДВУХФАЗНЫЙ в [пол, верх
+ *  контракта]: (A) минимальный size с profit > 0 — точка безубыточности;
+ *  (B) максимум profit — тернарное уточнение пика. Ордер подаётся на
+ *  оптимальный размер; min_out = opt_size + gas + required(opt_size).
  *  Сделка стала невыгодной до заполнения — отмена: слот откатывается,
  *  теряется только моделируемый газ.
  * ==========================================================================
@@ -82,11 +88,16 @@ typedef struct tb_arb_cfg {
 
     /* decision */
     uint64_t poll_ms;         /* 0 -> 8000 */
-    uint64_t probe_wei;       /* 0 -> 1e14 */
-    uint64_t min_trade_wei;   /* 0 -> 1e14 */
-    uint64_t max_trade_wei;   /* 0 -> 1e16 — верх контракта */
-    uint64_t min_profit_wei;  /* 0 -> 1e13 */
-    uint64_t gas_est_wei;     /* 0 -> 2e14 на цикл */
+    uint64_t probe_wei;       /* 0 -> 1e14 (проба фильтра ликвидности) */
+    uint64_t min_trade_wei;   /* 0 -> движок ищет точку безубыточности от
+                               * TB_ARB_SIZE_FLOOR_WEI; ненулевое — ручной
+                               * пол поиска (совместимость) */
+    uint64_t max_trade_wei;   /* 0 -> 1e16 — абсолютный потолок капитала
+                               * на сделку (верх контракта) */
+    uint64_t min_profit_wei;  /* 0 -> 1e13 — абсолютный защитный минимум
+                               * прибыли (floor, не «прибыльность») */
+    uint64_t gas_est_wei;     /* 0 -> 2e14 — фолбэк газа, когда цена с
+                               * цепи не получена; расчёт всегда живой */
     uint64_t deadline_ms;     /* 0 -> 8000 окно жизни ордера */
     uint32_t max_pairs_per_poll; /* 0 -> 1 */
 
@@ -191,28 +202,46 @@ typedef int (*tb_arb_quote_fn)(void *ctx, const tb_addr_t *pool,
                                const tb_u256_t *amount, tb_u256_t *out,
                                tb_error_t *err);
 
+/* ---- Константы решения (не конфиг: политика движения, не ручки
+ * прибыльности). Газ Units = форма транзакции Safe execTransaction +
+ * exactInput двух хопов; риск = б.п. от размера на движение цены между
+ * расчётом и включением в блок; пол = старт поиска точки безубыточности
+ * (ниже — котировки 6-знаковых токенов теряют смысл). */
+#define TB_ARB_GAS_UNITS     420000ull
+#define TB_ARB_RISK_BP       5ull
+#define TB_ARB_SIZE_FLOOR_WEI 1000000000000ull /* 1e12 wei = 1e-6 ETH */
+
 /* ---- Decision Engine (чистая функция) ---- */
 
 typedef struct tb_arb_pair {
     /* вход */
     const tb_arb_snap_t *buy;  /* пул покупки WETH -> TOKEN */
     const tb_arb_snap_t *sell; /* пул продажи TOKEN -> WETH */
+    /* газ цикла, рассчитанный из цены газа цепи на батч (цепь ×
+     * TB_ARB_GAS_UNITS); 0 -> фолбэк cfg->gas_est_wei */
+    uint64_t gas_cost_wei;
 } tb_arb_pair_in_t;
 
 typedef struct tb_arb_pair_res {
     bool     ok;          /* сделка предложена */
     char     reason[80];  /* почему нет (для decision.evaluated) */
-    tb_u256_t size;       /* найденная минимальная ставка */
+    tb_u256_t size;       /* точка безубыточности: минимальная ставка */
     tb_u256_t buy_out;    /* TOKEN за size (точная) */
     tb_u256_t sell_out;   /* WETH за buy_out (точная) */
-    tb_u256_t min_out;    /* size + min_profit + gas */
+    tb_u256_t opt_size;   /* оптимальная ставка (максимум прибыли) */
+    tb_u256_t opt_sell_out; /* WETH за opt_size (точная) */
+    tb_u256_t opt_profit; /* чистая прибыль на opt_size (wei) */
+    tb_u256_t min_out;    /* пол ордера: opt_size + gas + required */
+    uint64_t  gas_cost_wei; /* газ, использованный в расчёте */
     uint32_t  probes;     /* итераций поиска размера */
 } tb_arb_pair_res_t;
 
-/* Оценить пару: точные цепные котировки через quote_fn, поиск
- * минимального size с profit > 0 геометрическим делением в
- * [min_trade, верх контракта]. Возврат — число записанных результатов
- * (0/1), -1 — ошибка котировщика (err). */
+/* Оценить пару: точные цепные котировки через quote_fn. Фаза A ищет
+ * минимальный size с profit > 0 (быстрый путь через верх контракта,
+ * иначе геометрическая лестница внутри диапазона — ловит окна,
+ * не дотягивающиеся до верха), фаза B — максимум прибыли тернарным
+ * уточнением. Ордер подавать на opt_size. Возврат — 0/1, -1 — ошибка
+ * котировщика (err). */
 int tb_arb_eval_pair(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
                      tb_arb_quote_fn quote, void *qctx,
                      tb_arb_pair_res_t *res, tb_error_t *err);

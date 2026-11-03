@@ -300,6 +300,13 @@ static void *mock_thread(void *arg)
             }
             result[18] = '\0'; /* компактный hex достаточно */
             ok = 1;
+        } else if (strstr(body, "\"eth_gasPrice\"")) {
+            /* P1: живой газ в решении — replay тренирует тот же путь.
+             * 1e6 wei: газ цикла ~4.2e11 wei соизмерим со старой оценкой
+             * демо — конвейер находит и исполняет сделки офлайн */
+            memcpy(result + 2, "f4240", 5);
+            result[7] = '\0';
+            ok = 1;
         } else {
             const char *to = strstr(body, "\"to\":\"0x");
             const char *d = strstr(body, "\"data\":\"0x");
@@ -803,10 +810,11 @@ int main(int argc, char **argv)
                      "http://127.0.0.1:%u", (unsigned)app.mock.port);
         cfg.poll_ms = 1200;
         cfg.probe_wei = 100000000000000ull;
-        cfg.min_trade_wei = 100000000000000ull;
+        /* min_trade не навязываем: движок ищет точку безубыточности
+         * сам (P1) — replay тренирует производный пол */
         cfg.max_trade_wei = 4000000000000000ull;
         cfg.min_profit_wei = 100000000000ull;
-        cfg.gas_est_wei = 400000000000ull;
+        cfg.gas_est_wei = 400000000000ull; /* фолбэк: газ придёт с mock */
         cfg.deadline_ms = 4000;
         cfg.dex.fill_delay_min_ms = 150;
         cfg.dex.fill_delay_max_ms = 300;
@@ -1011,14 +1019,18 @@ int main(int argc, char **argv)
 
     {
         char mn[40], mx[40];
-        tb_u256_t v = tb_u256_from_u64(cfg.min_trade_wei);
+        tb_u256_t v = tb_u256_from_u64(cfg.min_trade_wei
+                                           ? cfg.min_trade_wei
+                                           : TB_ARB_SIZE_FLOOR_WEI);
         eth_str(&v, mn, sizeof(mn));
         v = tb_u256_from_u64(cfg.max_trade_wei);
         eth_str(&v, mx, sizeof(mx));
-        printf("арбитраж: %u пулов (%u бирж), период %llu мс, минимум %s ETH, "
-               "верх контракта %s ETH\n",
+        printf("арбитраж: %u пулов (%u бирж), период %llu мс, пол поиска %s "
+               "%s, верх контракта %s ETH\n",
                cfg.pools_n, cfg.dex.venues_n,
-               (unsigned long long)cfg.poll_ms, mn, mx);
+               (unsigned long long)cfg.poll_ms, mn,
+               cfg.min_trade_wei ? "ETH" : "ETH (безубыточность ищет движок)",
+               mx);
     }
 
     /* ---- прогон ---- */

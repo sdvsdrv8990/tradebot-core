@@ -681,6 +681,10 @@ int tb_exec_dex_init(tb_exec_backend_t *b, tb_http_t *http,
     c->rand_state = cfg->seed ? cfg->seed : tb_rdtsc();
 
     for (uint32_t v = 0; v < c->cfg.venues_n; v++) {
+        /* имя — ДО free(c): TB_ERROR_FAIL форматирует сообщение, а
+         * venues живут внутри освобождаемого ctx (ASan ловил UAF) */
+        char vname[TB_DEX_NAME_MAX];
+        snprintf(vname, sizeof(vname), "%s", c->cfg.venues[v].name);
         if (!c->cfg.venues[v].rpc_url[0] || c->cfg.venues[v].pools_n == 0) {
             free(c);
             TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
@@ -691,15 +695,13 @@ int tb_exec_dex_init(tb_exec_backend_t *b, tb_http_t *http,
             && tb_addr_is_native(&c->cfg.venues[v].router)) {
             free(c);
             TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
-                          "dex: venue %u (%s, V2) без router", v,
-                          c->cfg.venues[v].name);
+                          "dex: venue %u (%s, V2) без router", v, vname);
         }
         if (c->cfg.venues[v].kind != TB_DEX_V2
             && tb_addr_is_native(&c->cfg.venues[v].quoter)) {
             free(c);
             TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
-                          "dex: venue %u (%s, V3) без quoter", v,
-                          c->cfg.venues[v].name);
+                          "dex: venue %u (%s, V3) без quoter", v, vname);
         }
     }
 
@@ -813,6 +815,37 @@ int tb_exec_dex_block_number(tb_http_t *http, const tb_exec_dex_venue_t *v,
                       "eth_blockNumber: некорректный результат '%.32s'",
                       result);
     *block = strtoull(result + 2, NULL, 16);
+    return 0;
+}
+
+int tb_exec_dex_gas_price(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                          uint64_t *price_wei, tb_error_t *err)
+{
+    char result[80];
+    if (rpc_result(http, v,
+                   "{\"jsonrpc\":\"2.0\",\"method\":\"eth_gasPrice\","
+                   "\"params\":[],\"id\":1}",
+                   result, sizeof(result), err) != 0)
+        return -1;
+    size_t len = strlen(result);
+    if (len < 3 || result[0] != '0' || result[1] != 'x')
+        TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                      "eth_gasPrice: некорректный результат '%.32s'",
+                      result);
+    uint64_t base = strtoull(result + 2, NULL, 16);
+
+    /* приоритетная премия опциональна: не все узлы дают метод */
+    uint64_t prio = 0;
+    tb_error_t perr = TB_ERROR_INIT;
+    if (rpc_result(http, v,
+                   "{\"jsonrpc\":\"2.0\",\"method\":"
+                   "\"eth_maxPriorityFeePerGas\",\"params\":[],\"id\":1}",
+                   result, sizeof(result), &perr) == 0
+        && strlen(result) > 2 && result[0] == '0' && result[1] == 'x')
+        prio = strtoull(result + 2, NULL, 16);
+
+    unsigned __int128 total = (unsigned __int128)base + prio;
+    *price_wei = total >> 64 ? UINT64_MAX : (uint64_t)total;
     return 0;
 }
 

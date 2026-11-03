@@ -103,9 +103,11 @@ typedef struct arb_batch {
     size_t          remaining;      /* атомика не нужна: меняем в цикле */
     size_t          n;              /* = pools_n, слоты фиксированы */
     /* мультичейн: свой блок на каждую цепь батча (номер блока одной
-     * цепи не существует на другой); 0 — не достали */
+     * цепи не существует на другой); 0 — не достали. Газ той же цепи —
+     * цена base+priority (0 — не достали: фолбэк gas_est_wei) */
     uint64_t        chains[TB_DEX_MAX_VENUES];
     uint64_t        blocks[TB_DEX_MAX_VENUES];
+    uint64_t        gas_wei[TB_DEX_MAX_VENUES];
     uint32_t        chains_n;
     tb_arb_snap_t   snaps[TB_ARB_MAX_POOLS];
     /* Владение батчём — подсчёт ссылок: pool_jobs_n pool_dtor-ов + один
@@ -399,19 +401,31 @@ static void decide_work(void *arg)
                 continue;
             if (d->batch->snaps[i].block != d->batch->snaps[j].block)
                 continue;
-            /* перекотировки решения — на блоке цепи пары */
+            /* перекотировки решения — на блоке цепи пары; газ цикла —
+             * цена газа той же цепи × Units (P1: живой газ, не конфиг).
+             * Не достали — 0, движок решения возьмёт gas_est_wei */
+            uint64_t gas_cost = 0;
             {
                 uint64_t blk = 0;
                 for (uint32_t c = 0; c < d->batch->chains_n; c++)
                     if (d->batch->chains[c]
-                        == d->batch->snaps[i].chain)
+                        == d->batch->snaps[i].chain) {
                         blk = d->batch->blocks[c];
+                        if (d->batch->gas_wei[c]) {
+                            unsigned __int128 g =
+                                (unsigned __int128)d->batch->gas_wei[c]
+                                * TB_ARB_GAS_UNITS;
+                            gas_cost = g >> 64 ? UINT64_MAX : (uint64_t)g;
+                        }
+                        break;
+                    }
                 tb_exec_dex_set_quote_block(blk);
             }
 
             tb_arb_pair_in_t pin = {
                 .buy = &d->batch->snaps[i],
                 .sell = &d->batch->snaps[j],
+                .gas_cost_wei = gas_cost,
             };
             struct res_ent *e = &d->results[d->results_n];
             tb_error_t qerr = TB_ERROR_INIT;
@@ -549,15 +563,19 @@ static void emit_evaluated(tb_arb_t *a, arb_batch_t *b, decide_job_t *d)
     APPEND("],\"pairs\":[");
     for (size_t k = 0; k < d->results_n; k++) {
         struct res_ent *e = &d->results[k];
-        char bp[43], sp[43], sz[80], so[80];
+        char bp[43], sp[43], sz[80], so[80], os[80], opf[80];
         tb_addr_to_hex(&b->snaps[e->buy_i].pool, bp, sizeof(bp));
         tb_addr_to_hex(&b->snaps[e->sell_i].pool, sp, sizeof(sp));
         tb_u256_to_dec(&e->r.size, sz, sizeof(sz));
         tb_u256_to_dec(&e->r.sell_out, so, sizeof(so));
+        tb_u256_to_dec(&e->r.opt_size, os, sizeof(os));
+        tb_u256_to_dec(&e->r.opt_profit, opf, sizeof(opf));
         APPEND("%s{\"buy\":\"%s\",\"sell\":\"%s\",\"ok\":%s,"
-               "\"size\":\"%s\",\"sell_out\":\"%s\",\"probes\":%u,"
-               "\"reason\":\"%s\"}",
+               "\"size\":\"%s\",\"sell_out\":\"%s\",\"opt_size\":\"%s\","
+               "\"opt_profit_wei\":\"%s\",\"gas_cost_wei\":%llu,"
+               "\"probes\":%u,\"reason\":\"%s\"}",
                k ? "," : "", bp, sp, e->r.ok ? "true" : "false", sz, so,
+               os, opf, (unsigned long long)e->r.gas_cost_wei,
                e->r.probes, e->r.reason);
     }
     APPEND("]}");
@@ -622,6 +640,11 @@ static void decide_done(tb_loop_t *loop, void *arg)
             continue;
         budget--;
 
+        /* ставка — оптимум кривой прибыли (фаза B), не минимум */
+        tb_u256_t stake = e->r.opt_size;
+        if (tb_u256_is_zero(&stake))
+            stake = e->r.size;
+
         tb_arb_snap_t *bs = &d->batch->snaps[e->buy_i];
         tb_arb_snap_t *ss = &d->batch->snaps[e->sell_i];
         tb_addr_t toks[3] = { bs->weth, bs->token, ss->weth };
@@ -637,7 +660,7 @@ static void decide_done(tb_loop_t *loop, void *arg)
         tb_exec_order_t o = {0};
         o.token_in = a->cfg.weth; /* цикл целиком в wrapped-токенах */
         o.token_out = a->cfg.weth;
-        o.amount_in = e->r.size;
+        o.amount_in = stake;
         o.amount_out_min = e->r.min_out;
         o.deadline_ms =
             tb_wall_ms() + (a->cfg.deadline_ms ? a->cfg.deadline_ms : 8000);
@@ -650,18 +673,21 @@ static void decide_done(tb_loop_t *loop, void *arg)
 
         a->stats.orders_submitted++;
         a->pending[a->pending_n].event_id = ev;
-        a->pending[a->pending_n].size = e->r.size;
+        a->pending[a->pending_n].size = stake;
         a->pending[a->pending_n].min_out = e->r.min_out;
         a->pending[a->pending_n].route = route;
         a->pending_n++;
 
-        char sz[80], mo[80];
-        tb_u256_to_dec(&e->r.size, sz, sizeof(sz));
+        char sz[80], mo[80], op[80];
+        tb_u256_to_dec(&stake, sz, sizeof(sz));
         tb_u256_to_dec(&e->r.min_out, mo, sizeof(mo));
-        char pay[512];
+        tb_u256_to_dec(&e->r.opt_profit, op, sizeof(op));
+        char pay[640];
         snprintf(pay, sizeof(pay),
-                 "{\"event_id\":%llu,\"size\":\"%s\",\"min_out\":\"%s\"}",
-                 (unsigned long long)ev, sz, mo);
+                 "{\"event_id\":%llu,\"size\":\"%s\",\"min_out\":\"%s\","
+                 "\"opt_profit_wei\":\"%s\",\"gas_cost_wei\":%llu}",
+                 (unsigned long long)ev, sz, mo, op,
+                 (unsigned long long)e->r.gas_cost_wei);
         tb_error_t lerr = TB_ERROR_INIT;
         tb_ledger_emit(a->ledger, "decision.submitted", pay, NULL, NULL,
                        &lerr);
@@ -792,8 +818,17 @@ static void prep_work(void *arg)
             if (tb_exec_dex_block_number(a->http, v, &blk, &err) != 0)
                 blk = 0; /* деградация: latest, блок неизвестен */
         }
+        /* газ той же цепи: живая цена на момент батча (P1); не достали —
+         * 0, движок решения деградирует на конфиг-фолбэк */
+        uint64_t gas = 0;
+        if (v) {
+            tb_error_t gerr = TB_ERROR_INIT;
+            if (tb_exec_dex_gas_price(a->http, v, &gas, &gerr) != 0)
+                gas = 0;
+        }
         j->batch->chains[j->batch->chains_n] = ch;
         j->batch->blocks[j->batch->chains_n] = blk;
+        j->batch->gas_wei[j->batch->chains_n] = gas;
         j->batch->chains_n++;
     }
 }

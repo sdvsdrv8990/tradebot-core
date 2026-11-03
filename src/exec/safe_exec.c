@@ -348,7 +348,7 @@ static int call_addr_method(tb_http_t *h, const tb_safe_cfg_t *c,
 
     char to_hex[43];
     tb_addr_to_hex(to, to_hex, sizeof(to_hex));
-    char data_hex[4 + 64 * 2 + 3];
+    char data_hex[2 + sizeof(data) * 2 + 1]; /* "0x" + hex всех байтов */
     char *p = data_hex;
     p += sprintf(p, "0x");
     for (size_t i = 0; i < sizeof(data); i++)

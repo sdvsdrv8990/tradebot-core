@@ -31,9 +31,12 @@ int main(void)
     hex_of(h, 32, buf);
     CHECK_STR_EQ(buf, "4e03657aea45a9cfc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45");
 
-    /* Длинный вход (больше одного блока 136 байт) */
-    tb_keccak256("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno"
-                 "ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu", 135, h);
+    /* Длинный вход: конкатенация NIST-векторов; длина — по строке
+     * (ASan ловил завышенную длину 135: чтение за концом литерала) */
+    static const char long_in[]
+        = "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno"
+          "ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+    tb_keccak256(long_in, sizeof(long_in) - 1, h);
     /* известный вектор NIST для sha3-512-подобной строки тут не применим:
      * проверяем стабильность и длину, селекторы ниже — главный эталон */
     CHECK(h[0] != 0 || h[1] != 0);
