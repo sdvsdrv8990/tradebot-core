@@ -681,6 +681,10 @@ int tb_exec_dex_init(tb_exec_backend_t *b, tb_http_t *http,
     c->rand_state = cfg->seed ? cfg->seed : tb_rdtsc();
 
     for (uint32_t v = 0; v < c->cfg.venues_n; v++) {
+        /* имя — ДО free(c): TB_ERROR_FAIL форматирует сообщение, а
+         * venues живут внутри освобождаемого ctx (ASan ловил UAF) */
+        char vname[TB_DEX_NAME_MAX];
+        snprintf(vname, sizeof(vname), "%s", c->cfg.venues[v].name);
         if (!c->cfg.venues[v].rpc_url[0] || c->cfg.venues[v].pools_n == 0) {
             free(c);
             TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
@@ -691,15 +695,13 @@ int tb_exec_dex_init(tb_exec_backend_t *b, tb_http_t *http,
             && tb_addr_is_native(&c->cfg.venues[v].router)) {
             free(c);
             TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
-                          "dex: venue %u (%s, V2) без router", v,
-                          c->cfg.venues[v].name);
+                          "dex: venue %u (%s, V2) без router", v, vname);
         }
         if (c->cfg.venues[v].kind != TB_DEX_V2
             && tb_addr_is_native(&c->cfg.venues[v].quoter)) {
             free(c);
             TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
-                          "dex: venue %u (%s, V3) без quoter", v,
-                          c->cfg.venues[v].name);
+                          "dex: venue %u (%s, V3) без quoter", v, vname);
         }
     }
 
