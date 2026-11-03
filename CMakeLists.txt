@@ -122,7 +122,7 @@ add_library(tb_dex STATIC
   src/exec/safe_exec.c
 )
 target_include_directories(tb_dex PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(tb_dex PUBLIC tb_net tb_core tb_sign)
+target_link_libraries(tb_dex PUBLIC tb_net tb_core)
 
 # ---------------------------------------------------------------------------
 #  tb_user — USER-домен: фильтры 1–4, Decision Engine, рантайм арбитража

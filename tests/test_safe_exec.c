@@ -1,10 +1,11 @@
 /* ==========================================================================
- *  tests/test_safe_exec.c — propose-only контур Safe на локальном
- *  mock-RPC (обычный HTTP, 127.0.0.1): calldata (exactInput/approve/
- *  execTransaction), EIP-712-хеш, ПРЯМАЯ подпись (восстановление адреса
- *  из safeTxHash), подготовка предложения БЕЗ отправки, наблюдение за
- *  nonce (исполнение человеком = расчёт по дельте баланса) и истечение
- *  окна. Ключ детерминированный — подписи воспроизводимы.
+ *  tests/test_safe_exec.c — безключевой propose-контур Safe на локальном
+ *  mock (обычный HTTP, 127.0.0.1): calldata (exactInput/approve/
+ *  execTransaction), предложение БЕЗ ключа и подписи, публикация в
+ *  очередь (Transaction Service, POST /api/v1 -> 201), дисциплина
+ *  nonce/allowance (гейт -> approve-предложение; одно живое предложение;
+ *  замена того же nonce; рост nonce -> дельта баланса; истечение окна).
+ *  eth_sendRawTransaction не вызывается ни разу; приватных ключей нет.
  * ========================================================================== */
 #define TB_CURRENT_GROUP TB_G_DEMO
 
@@ -23,7 +24,6 @@
 #include "tb/exec/backend_dex.h"
 #include "tb/exec/safe_exec.h"
 #include "tb/net/http.h"
-#include "tb/sign/tx.h"
 
 static tb_addr_t A(const char *hex)
 {
@@ -42,15 +42,17 @@ static tb_addr_t WETH = { { 0xc0, 0x2a, 0xaa, 0x39, 0xb2, 0x23, 0xfe, 0x8d,
                             0x0a, 0x0e, 0x5c, 0x4f, 0x27, 0xea, 0xd9, 0x08,
                             0x3c, 0x75, 0x6c, 0xc2 } };
 
-/* ---- mock-RPC: eth_call различает nonce()/balanceOf по селектору ---- */
+/* ---- mock: JSON-RPC + REST очереди (POST /api/v1 -> 201) ---- */
 
 typedef struct mock {
     int fd, port;
     pthread_t th;
     volatile bool stop;
-    int sendraw_count;      /* попыток отправки: обязано быть НУЛЁМ */
-    uint64_t safe_nonce;    /* nonce() Safe; тест «исполняет» движением */
-    uint64_t balance_now;   /* balanceOf до/после «исполнения» */
+    int sendraw_count;   /* попыток отправки tx: обязано быть НУЛЁМ */
+    int service_posts;   /* публикаций в очередь Safe UI */
+    uint64_t safe_nonce; /* nonce(); тест «исполняет» движением */
+    uint64_t balance;    /* balanceOf */
+    uint64_t allowance;  /* allowance(WETH, Safe -> router) */
 } mock_t;
 
 static void serve(mock_t *m, int c)
@@ -75,33 +77,46 @@ static void serve(mock_t *m, int c)
 
     char out[1024];
     int n = 0;
+    const char *hdr_extra = "";
 
-    if (strstr(body, "eth_chainId")) {
-        n = snprintf(out, sizeof(out), "{\"id\":1,\"result\":\"0x1\"}");
+    if (strncmp(req, "POST /api/v1/", 13) == 0) {
+        /* Safe Transaction Service: предложение в очередь */
+        m->service_posts++;
+        n = snprintf(out, sizeof(out), "{}");
+        hdr_extra = "X-Queued: 1";
     } else if (strstr(body, "eth_sendRawTransaction")) {
         m->sendraw_count++;
         n = snprintf(out, sizeof(out),
                      "{\"id\":1,\"error\":{\"code\":-1,"
                      "\"message\":\"propose-only: отправка запрещена\"}}");
+    } else if (strstr(body, "eth_chainId")) {
+        n = snprintf(out, sizeof(out), "{\"id\":1,\"result\":\"0x1\"}");
     } else if (strstr(body, "eth_call")) {
-        /* nonce() = 0x1d6da664 в calldata -> nonce Safe; остальное
-         * (balanceOf 0x70a08231 / allowance) -> баланс */
+        /* селекторы: nonce() 1d6da664 / balanceOf 70a08231 /
+         * allowance dd62ed3e */
         if (body && strstr(body, "1d6da664"))
             n = snprintf(out, sizeof(out),
                          "{\"id\":1,\"result\":\"0x%064llx\"}",
                          (unsigned long long)m->safe_nonce);
+        else if (body && strstr(body, "dd62ed3e"))
+            n = snprintf(out, sizeof(out),
+                         "{\"id\":1,\"result\":\"0x%064llx\"}",
+                         (unsigned long long)m->allowance);
         else
             n = snprintf(out, sizeof(out),
                          "{\"id\":1,\"result\":\"0x%064llx\"}",
-                         (unsigned long long)m->balance_now);
+                         (unsigned long long)m->balance);
     } else {
         n = snprintf(out, sizeof(out), "{\"id\":1,\"error\":{\"code\":-1}}");
     }
 
-    char hdr[128];
+    char hdr[192];
     int hn = snprintf(hdr, sizeof(hdr),
                       "HTTP/1.1 200 OK\r\nContent-Type: "
-                      "application/json\r\nConnection: close\r\n\r\n");
+                      "application/json\r\n%s%sContent-Length: %zu\r\n"
+                      "Connection: close\r\n\r\n",
+                      *hdr_extra ? hdr_extra : "",
+                      *hdr_extra ? "\r\n" : "", strlen(out));
     send(c, hdr, (size_t)hn, 0);
     send(c, out, (size_t)n, 0);
     close(c);
@@ -121,10 +136,12 @@ static void *mock_thread(void *arg)
 
 static void mock_start(mock_t *m)
 {
-    m->stop = false; /* инициализация до pthread_create — гонки нет */
+    m->stop = false;
     m->sendraw_count = 0;
+    m->service_posts = 0;
     m->safe_nonce = 5;
-    m->balance_now = 1000;
+    m->balance = 1000;
+    m->allowance = 0; /* старт без approve: гейт должен сработать */
     m->fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;
@@ -151,14 +168,14 @@ static void mock_stop(mock_t *m)
     close(m->fd);
 }
 
-/* улов предложений колбэком бэкенда */
-static tb_safe_proposal_t g_prop;
+/* улов предложений */
+static tb_safe_proposal_t g_props[8];
 static int g_prop_n;
 static void catch_proposal(const tb_safe_proposal_t *p, void *user)
 {
     (void)user;
-    g_prop = *p;
-    g_prop_n++;
+    if (g_prop_n < 8)
+        g_props[g_prop_n++] = *p;
 }
 
 int main(void)
@@ -169,12 +186,6 @@ int main(void)
 
     tb_http_t *http = tb_http_net_create("test", NULL, &err);
     CHECK(http != NULL);
-
-    tb_key_t key;
-    CHECK(tb_key_from_hex(
-        &key,
-        "0x8f2a55949038a9610f50fb23b5883af3b4ecb3c3bb792cbcefbd1542c692be63",
-        &err) == 0);
 
     /* ---- 1. Calldata: exactInput ---- */
     {
@@ -190,8 +201,7 @@ int main(void)
                                              &in, &mn);
         CHECK(n > 4 + 32 * 4 + 32 + 43);
         CHECK(buf[0] == 0xb8 && buf[1] == 0x58 && buf[2] == 0x18
-              && buf[3] == 0x3f); /* селектор exactInput */
-        /* recipient = Safe во втором слове головы (4 + 32*1) */
+              && buf[3] == 0x3f);
         CHECK(memcmp(buf + 4 + 32 * 1 + 12, SAFE.b, 20) == 0);
     }
 
@@ -203,24 +213,11 @@ int main(void)
         size_t n = tb_safe_build_approve(buf, sizeof(buf), &ROUTER, &amt);
         CHECK(n == 4 + 64);
         CHECK(buf[0] == 0x09 && buf[1] == 0x5e && buf[2] == 0xa7
-              && buf[3] == 0xb3); /* селектор approve(address,uint256) */
-        CHECK(memcmp(buf + 4 + 12, ROUTER.b, 20) == 0); /* spender */
-        /* amount: последнее слово */
-        tb_u256_t back;
-        uint64_t w[4];
-        for (int i = 0; i < 4; i++) {
-            w[i] = 0;
-            for (int b = 0; b < 8; b++)
-                w[i] = (w[i] << 8) | buf[4 + 32 + i * 8 + b];
-        }
-        back.w[0] = w[3];
-        back.w[1] = w[2];
-        back.w[2] = w[1];
-        back.w[3] = w[0];
-        CHECK(tb_u256_cmp(&back, &amt) == 0);
+              && buf[3] == 0xb3);
+        CHECK(memcmp(buf + 4 + 12, ROUTER.b, 20) == 0);
     }
 
-    /* ---- 3. Calldata: execTransaction ---- */
+    /* ---- 3. Calldata: execTransaction (универсальная сборка) ---- */
     {
         uint8_t data[64] = { 0xde, 0xad, 0xbe, 0xef };
         uint8_t sig[65];
@@ -229,74 +226,63 @@ int main(void)
         size_t n = tb_safe_build_exec_tx(buf, sizeof(buf), &ROUTER, 0, data,
                                          4, sig);
         CHECK(buf[0] == 0x6a && buf[1] == 0x76 && buf[2] == 0x12
-              && buf[3] == 0x02); /* селектор execTransaction */
-        CHECK(memcmp(buf + 4 + 12, ROUTER.b, 20) == 0); /* to */
+              && buf[3] == 0x02);
+        CHECK(memcmp(buf + 4 + 12, ROUTER.b, 20) == 0);
         CHECK(n > 4 + 32 * 10);
     }
 
-    /* ---- 4. Подпись: ПРЯМАЯ EIP-712 (Safe v=27/28 восстанавливает
-     *      адрес из самого safeTxHash) ---- */
-    {
-        tb_safe_cfg_t cfg = {0};
-        cfg.safe = SAFE;
-        cfg.key = key;
-        cfg.chain_id = 1;
-
-        uint8_t data[4] = { 0xde, 0xad, 0xbe, 0xef };
-        uint8_t hash[32], sig[65];
-        CHECK(tb_safe_tx_hash(&cfg, &ROUTER, 0, data, 4, 7, hash, &err) == 0);
-        CHECK(tb_safe_sign(&cfg, hash, sig, &err) == 0);
-        CHECK(sig[64] == 27 || sig[64] == 28);
-
-        tb_addr_t recovered;
-        CHECK(tb_sig_recover_sender(hash, sig, sig + 32,
-                                    sig[64] - 27, &recovered,
-                                    &err) == 0);
-        CHECK(tb_addr_eq(&recovered, &key.address));
-    }
-
-    /* ---- 5. Предложение: подготовка без отправки ---- */
+    /* ---- 4. Предложение БЕЗ ключа: подписи нет, verify есть ---- */
     {
         tb_safe_cfg_t cfg = {0};
         snprintf(cfg.rpc_url, sizeof(cfg.rpc_url), "http://127.0.0.1:%u",
                  (unsigned)mock.port);
         cfg.safe = SAFE;
-        cfg.key = key;
 
         tb_safe_proposal_t p;
-        uint8_t cd[4 + 64] = {0x09, 0x5e, 0xa7, 0xb3};
-        CHECK(tb_safe_propose_exec(http, &cfg, &WETH, 0, cd, sizeof(cd),
-                                   tb_now_ms(), &p, &err) == 0);
-        CHECK(p.chain_id == 1);        /* eth_chainId с mock */
-        CHECK(p.safe_nonce == 5);      /* nonce() с mock */
+        uint8_t cd[4 + 64];
+        tb_u256_t amt;
+        tb_u256_from_dec(&amt, "1000000000000000", 16, NULL);
+        size_t cd_len = tb_safe_build_approve(cd, sizeof(cd), &ROUTER,
+                                              &amt);
+        CHECK(tb_safe_propose_exec(http, &cfg, &WETH, 0, cd, cd_len,
+                                   tb_now_ms(), &p, &err)
+              == 0);
+        CHECK(p.chain_id == 1);
+        CHECK(p.safe_nonce == 5);
         CHECK(p.expires_at_ms > p.created_ms);
-        CHECK(p.data_len == sizeof(cd));
-        CHECK(memcmp(p.data, cd, sizeof(cd)) == 0);
+        CHECK(strcmp(p.kind, "trade") == 0);
+        CHECK(p.data_len == cd_len);
 
-        /* подпись предложения — тоже прямая EIP-712 */
-        tb_addr_t recovered;
-        CHECK(tb_sig_recover_sender(p.safe_tx_hash, p.sig65, p.sig65 + 32,
-                                    p.sig65[64] - 27, &recovered,
-                                    &err) == 0);
-        CHECK(tb_addr_eq(&recovered, &key.address));
-
-        /* JSON-артефакт содержит ключевые поля */
+        /* JSON: без bot_signature; kind и verify присутствуют */
         char js[1600];
         size_t jn = tb_safe_proposal_json(&p, js, sizeof(js));
         CHECK(jn > 100);
-        CHECK(strstr(js, "\"safe-proposal\"") != NULL);
+        CHECK(strstr(js, "\"bot_signature\"") == NULL);
+        CHECK(strstr(js, "\"kind\":\"trade\"") != NULL);
         CHECK(strstr(js, "\"nonce\":5") != NULL);
-        CHECK(strstr(js, "\"bot_signature\":\"0x") != NULL);
-
-        /* exec-calldata предложения — валидный execTransaction */
-        uint8_t buf[1024];
-        size_t en = tb_safe_proposal_exec_calldata(&p, buf, sizeof(buf));
-        CHECK(en > 4 + 32 * 10);
-        CHECK(buf[0] == 0x6a && buf[1] == 0x76);
     }
 
-    /* ---- 6. Полный live-цикл через DEX-адаптер: propose -> наблюдение
-     *      -> «исполнение человеком» -> дельта баланса ---- */
+    /* ---- 5. Публикация в очередь (service, мок на том же порту) ---- */
+    {
+        tb_safe_cfg_t cfg = {0};
+        snprintf(cfg.rpc_url, sizeof(cfg.rpc_url), "http://127.0.0.1:%u",
+                 (unsigned)mock.port);
+        snprintf(cfg.tx_service_url, sizeof(cfg.tx_service_url),
+                 "http://127.0.0.1:%u", (unsigned)mock.port);
+        cfg.safe = SAFE;
+
+        tb_safe_proposal_t p;
+        uint8_t cd[4] = { 0x09, 0x5e, 0xa7, 0xb3 };
+        CHECK(tb_safe_propose_exec(http, &cfg, &WETH, 0, cd, sizeof(cd),
+                                   tb_now_ms(), &p, &err)
+              == 0);
+        int posts = mock.service_posts;
+        CHECK(tb_safe_service_propose(http, &cfg, &p, &err) == 0);
+        CHECK(mock.service_posts == posts + 1); /* POST /api/v1 был */
+    }
+
+    /* ---- 6. Полный live-цикл: гейт -> approve -> подпись -> trade ---
+     * ---- замена -> исполнение -> дельта; истечение ---- */
     {
         tb_exec_dex_cfg_t cfg;
         memset(&cfg, 0, sizeof(cfg));
@@ -309,12 +295,12 @@ int main(void)
         cfg.venues_n = 1;
         cfg.seed = 42;
         cfg.live = true;
-        cfg.safe.key = key;
         snprintf(cfg.safe.rpc_url, sizeof(cfg.safe.rpc_url),
                  "http://127.0.0.1:%u", (unsigned)mock.port);
         cfg.safe.safe = SAFE;
         cfg.safe.router = ROUTER;
         cfg.safe.chain_id = 1;
+        cfg.approve_cap_wei = 10000000000000000ull;
         cfg.on_propose = catch_proposal;
 
         tb_exec_backend_t b;
@@ -323,46 +309,72 @@ int main(void)
         tb_addr_t usdc = A("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         tb_route_t r = tb_route_single(&WETH, &usdc, 500, &err);
         tb_route_set_pool(&r, 0, &cfg.venues[0].pools[0]);
-
-        /* submit: предложить (никакой отправки!) */
         tb_u256_t in, mn, got;
         tb_u256_from_dec(&in, "1000000000000000", 16, NULL);
-        tb_u256_from_dec(&mn, "900", 3, NULL); /* ниже mock-котировки */
+        tb_u256_from_dec(&mn, "900", 3, NULL);
         uint64_t tx = 0;
+
+        /* 6a. allowance = 0: trade отказан, предложен approve */
+        g_prop_n = 0;
         tb_error_t serr = TB_ERROR_INIT;
         int rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got,
                           &serr);
-        if (rc != 1)
-            printf("submit rc=%d err=%s\n", rc, serr.message);
+        CHECK(rc == -1);
+        CHECK(strstr(serr.message, "allowance") != NULL);
+        CHECK(g_prop_n == 1);
+        CHECK(strcmp(g_props[0].kind, "approve") == 0);
+        CHECK(mock.sendraw_count == 0);
+
+        /* 6b. allowance всё ещё 0: approve уже жив — trade отказан
+         *     без повторного approve-предложения */
+        g_prop_n = 0;
+        rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
+        CHECK(rc == -1);
+        CHECK(g_prop_n == 0); /* повтор не нужен — тот же approve жив */
+
+        /* 6c. «человек подписал approve»: allowance вырос, nonce тоже */
+        mock.allowance = 2000000000000000000ull;
+        mock.safe_nonce = 6;
+        g_prop_n = 0;
+        rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
         CHECK(rc == 1);
         CHECK(tx != 0);
-        CHECK(mock.sendraw_count == 0); /* НИЧЕГО не отправлено */
-        CHECK(g_prop_n == 1);           /* предложение отдано наверх */
-        CHECK(g_prop.safe_nonce == 5);
+        CHECK(g_prop_n == 1);
+        CHECK(strcmp(g_props[0].kind, "trade") == 0);
+        CHECK(g_props[0].safe_nonce == 6);
+        uint64_t tx1 = tx;
 
-        /* poll: nonce не двигался — ждём */
+        /* 6d. poll: nonce не двигался — ждём */
         tb_error_t perr = TB_ERROR_INIT;
-        CHECK(b.poll(&b, tx, tb_now_ms(), &got, &perr) == 1);
+        CHECK(b.poll(&b, tx1, tb_now_ms(), &got, &perr) == 1);
 
-        /* «человек исполнил»: nonce вырос, баланс изменился */
-        mock.safe_nonce = 6;
-        mock.balance_now = 1500;
-        CHECK(b.poll(&b, tx, tb_now_ms(), &got, &perr) == 0);
-        CHECK(got.w[0] == 500); /* дельта 1500-1000 */
-        CHECK(got.w[1] == 0);
-
-        /* ---- 7. Истечение окна: отказ без цепи ---- */
+        /* 6e. второе предложение до исполнения заменяет первое */
         g_prop_n = 0;
         rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
         CHECK(rc == 1);
         CHECK(g_prop_n == 1);
-        CHECK(mock.sendraw_count == 0);
-        /* далеко за окном наблюдения */
+        CHECK(g_props[0].safe_nonce == 6); /* тот же nonce */
+        uint64_t tx2 = tx;
+        tb_error_t oerr = TB_ERROR_INIT;
+        CHECK(b.poll(&b, tx1, tb_now_ms(), &got, &oerr) == -1);
+        CHECK(strstr(oerr.message, "заменено") != NULL);
+
+        /* 6f. «исполнение»: nonce вырос, баланс сместился */
+        mock.safe_nonce = 7;
+        mock.balance = 1500;
+        CHECK(b.poll(&b, tx2, tb_now_ms(), &got, &perr) == 0);
+        CHECK(got.w[0] == 500); /* дельта 1500-1000 */
+
+        /* 6g. истечение окна: отказ без цепи */
+        g_prop_n = 0;
+        rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
+        CHECK(rc == 1);
         tb_error_t eerr = TB_ERROR_INIT;
         CHECK(b.poll(&b, tx, tb_now_ms() + TB_SAFE_PROPOSAL_WATCH_MS + 1000,
-                     &got, &eerr) == -1);
+                     &got, &eerr)
+              == -1);
         CHECK(strstr(eerr.message, "истекло") != NULL);
-        CHECK(mock.sendraw_count == 0); /* и после истечения — тишина */
+        CHECK(mock.sendraw_count == 0); /* ни одной отправки за всё */
 
         b.destroy(&b);
     }

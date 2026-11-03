@@ -1,12 +1,13 @@
 #define TB_CURRENT_GROUP TB_G_DEX /* зона ответственности файла */
 
 /* ==========================================================================
- *  tb/exec/safe_exec.c — подготовка исполнения из Safe (propose-only).
+ *  tb/exec/safe_exec.c — подготовка исполнения из Safe (безключевой).
  *
- *  Бот готовит: chainId -> nonce(Safe) -> EIP-712 SafeTx-хеш -> прямая
- *  подпись владельца-бота (v=parity+27) -> предложение наверх.
- *  Никакой отправки: исполнение — за человеком (вторая подпись в
- *  кошельке). Результат бот читает дельтой balanceOf после роста nonce.
+ *  Бот готовит: chainId -> nonce(Safe) -> EIP-712 SafeTx-хеш ->
+ *  предложение наверх (артефакт + очередь Safe UI через Transaction
+ *  Service). Приватных ключей и отправки нет как класса: подписывает и
+ *  исполняет человек (Safe 1-из-1). Результат бот читает дельтой
+ *  balanceOf после роста nonce.
  * ========================================================================== */
 #include "tb/exec/safe_exec.h"
 
@@ -213,26 +214,6 @@ int tb_safe_tx_hash(const tb_safe_cfg_t *cfg, const tb_addr_t *to,
     return 0;
 }
 
-int tb_safe_sign(const tb_safe_cfg_t *cfg, const uint8_t safe_tx_hash[32],
-                 uint8_t sig65[65], tb_error_t *err)
-{
-    /* Прямая EIP-712 подпись: Safe для v=27/28 восстанавливает адрес
-     * ecrecover-ом из САМОГО safeTxHash. (Прежний вариант подписывал
-     * EIP-191-обёртку "\x19Ethereum Signed Message:\n32" с теми же
-     * v=27/28 — Safe восстановил бы чужой адрес и отверг GS026;
-     * обёртка легитимна только с v=0, мы её не используем.) */
-    (void)cfg;
-    int parity = 0;
-    tb_error_t serr = TB_ERROR_INIT;
-    if (tb_ecdsa_sign(&cfg->key, safe_tx_hash, sig65, sig65 + 32, &parity,
-                      &serr) != 0) {
-        if (err)
-            *err = serr;
-        return -1;
-    }
-    sig65[64] = (uint8_t)(parity + 27);
-    return 0;
-}
 
 /* ---- Предложения (propose-only) ---- */
 
@@ -260,8 +241,6 @@ int tb_safe_propose_exec(tb_http_t *h, const tb_safe_cfg_t *c,
     if (tb_safe_tx_hash(&cfg, to, value, data, data_len, nonce,
                         out->safe_tx_hash, err) != 0)
         return -1;
-    if (tb_safe_sign(&cfg, out->safe_tx_hash, out->sig65, err) != 0)
-        return -1;
 
     out->chain_id = chain;
     out->safe = c->safe;
@@ -270,6 +249,7 @@ int tb_safe_propose_exec(tb_http_t *h, const tb_safe_cfg_t *c,
     memcpy(out->data, data, data_len);
     out->data_len = data_len;
     out->safe_nonce = nonce;
+    snprintf(out->kind, sizeof(out->kind), "trade");
     out->created_ms = now_ms;
     out->expires_at_ms = now_ms + TB_SAFE_PROPOSAL_WATCH_MS;
     return 0;
@@ -278,8 +258,25 @@ int tb_safe_propose_exec(tb_http_t *h, const tb_safe_cfg_t *c,
 size_t tb_safe_proposal_exec_calldata(const tb_safe_proposal_t *p,
                                       uint8_t *buf, size_t cap)
 {
+    /* подписей бота больше нет: кошелёк человека подписывает сам;
+     * calldata здесь — справочный «сырой» execTransaction для
+     * инструментов, работающих с одной сигнатурой владельца */
+    uint8_t no_sig[65] = { 0 };
     return tb_safe_build_exec_tx(buf, cap, &p->to, p->value, p->data,
-                                 p->data_len, p->sig65);
+                                 p->data_len, no_sig);
+}
+
+/* Десятичное u256-слово calldata по смещению байта (для verify-блока). */
+static void word_dec(const uint8_t *data, size_t off, char *buf, size_t cap)
+{
+    tb_u256_t v = tb_u256_from_u64(0);
+    for (int w = 0; w < 4; w++) {
+        uint64_t acc = 0;
+        for (int b = 0; b < 8; b++)
+            acc = (acc << 8) | data[off + w * 8 + b];
+        v.w[3 - w] = acc;
+    }
+    tb_u256_to_dec(&v, buf, cap);
 }
 
 size_t tb_safe_proposal_json(const tb_safe_proposal_t *p, char *out,
@@ -288,33 +285,42 @@ size_t tb_safe_proposal_json(const tb_safe_proposal_t *p, char *out,
     if (!p || !out || cap == 0)
         return 0;
 
-    char safe_h[43], to_h[43], stx_h[67], sig_h[133], data_h[2 + 512 * 2 + 1];
+    char safe_h[43], to_h[43], stx_h[67], data_h[2 + 512 * 2 + 1];
     tb_addr_to_hex(&p->safe, safe_h, sizeof(safe_h));
     tb_addr_to_hex(&p->to, to_h, sizeof(to_h));
-    for (int i = 0; i < 32; i++)
-        sprintf(stx_h + 2 + i * 2, "%02x", p->safe_tx_hash[i]);
     stx_h[0] = '0';
     stx_h[1] = 'x';
-    for (int i = 0; i < 65; i++)
-        sprintf(sig_h + 2 + i * 2, "%02x", p->sig65[i]);
-    sig_h[0] = '0';
-    sig_h[1] = 'x';
+    for (int i = 0; i < 32; i++)
+        sprintf(stx_h + 2 + i * 2, "%02x", p->safe_tx_hash[i]);
     data_h[0] = '0';
     data_h[1] = 'x';
     for (size_t i = 0; i < p->data_len; i++)
         sprintf(data_h + 2 + i * 2, "%02x", p->data[i]);
     data_h[2 + p->data_len * 2] = '\0';
 
+    /* verify-блок: числа для сверки с кошельком (не hex) — точный
+     * calldata exactInput несёт amountIn/minOut в словах 3 и 4 после
+     * селектора (голова: offset, recipient, amountIn, minOut) */
+    char vin[80] = "\"\"", vmin[80] = "\"\"";
+    if (p->data_len >= 4 + 32 * 4 && (p->data[0] << 24 | p->data[1] << 16
+                                       | p->data[2] << 8 | p->data[3])
+                                          == (int)SEL_EXACT_INPUT) {
+        word_dec(p->data, 4 + 32 * 2, vin, sizeof(vin));
+        word_dec(p->data, 4 + 32 * 3, vmin, sizeof(vmin));
+    }
+
     int n = snprintf(out, cap,
-                     "{\"kind\":\"safe-proposal\",\"chain_id\":%llu,"
+                     "{\"kind\":\"%s\",\"chain_id\":%llu,"
                      "\"safe\":\"%s\",\"to\":\"%s\",\"value\":%llu,"
                      "\"data\":\"%s\",\"operation\":0,\"safe_tx_gas\":0,"
                      "\"base_gas\":0,\"gas_price\":\"0\",\"nonce\":%llu,"
-                     "\"safe_tx_hash\":\"%s\",\"bot_signature\":\"%s\","
+                     "\"safe_tx_hash\":\"%s\","
+                     "\"verify\":{\"amount_in_wei\":\"%s\","
+                     "\"amount_out_minimum_wei\":\"%s\"},"
                      "\"created_ms\":%llu,\"expires_at_ms\":%llu}",
-                     (unsigned long long)p->chain_id, safe_h, to_h,
+                     p->kind, (unsigned long long)p->chain_id, safe_h, to_h,
                      (unsigned long long)p->value, data_h,
-                     (unsigned long long)p->safe_nonce, stx_h, sig_h,
+                     (unsigned long long)p->safe_nonce, stx_h, vin, vmin,
                      (unsigned long long)p->created_ms,
                      (unsigned long long)p->expires_at_ms);
     return n < 0 ? 0 : (size_t)n;
@@ -517,3 +523,88 @@ int tb_safe_allowance(tb_http_t *h, const tb_safe_cfg_t *c,
                             err);
 }
 
+
+/* ---- Публикация в очередь Safe UI (Transaction Service) ----
+ * POST {service}/api/v1/safes/{safe}/multisig-transactions/ —
+ * предложение БЕЗ подписи: при пороге 1 одно подтверждение человека
+ * в интерфейсе = исполнение. 201/200 = в очереди. Ошибка — вызывающий
+ * деградирует на артефакт-файл, конвейер не останавливать. */
+int tb_safe_service_propose(tb_http_t *h, const tb_safe_cfg_t *c,
+                            const tb_safe_proposal_t *p, tb_error_t *err)
+{
+    if (!h || !c || !p || !c->tx_service_url[0])
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_INVALID_ARG,
+                      "service: url не задан");
+
+    char safe_h[43], to_h[43], data_h[2 + 512 * 2 + 1];
+    tb_addr_to_hex(&p->safe, safe_h, sizeof(safe_h));
+    tb_addr_to_hex(&p->to, to_h, sizeof(to_h));
+    data_h[0] = '0';
+    data_h[1] = 'x';
+    for (size_t i = 0; i < p->data_len; i++)
+        sprintf(data_h + 2 + i * 2, "%02x", p->data[i]);
+    data_h[2 + p->data_len * 2] = '\0';
+
+    char url[TB_HTTP_URL_MAX + 96];
+    snprintf(url, sizeof(url),
+             "%s/api/v1/safes/%s/multisig-transactions/",
+             c->tx_service_url, safe_h);
+
+    static char body[140000];
+    int n = snprintf(body, sizeof(body),
+                     "{\"to\":\"%s\",\"value\":\"%llu\","
+                     "\"data\":\"%s\",\"operation\":0,"
+                     "\"safeTxGas\":\"0\",\"baseGas\":\"0\","
+                     "\"gasPrice\":\"0\","
+                     "\"gasToken\":\"0x0000000000000000000000000000000000"
+                     "000000\",\"refundReceiver\":\"0x00000000000000000000"
+                     "00000000000000000000\",\"nonce\":%llu,"
+                     "\"origin\":\"tradebot-core %s\"}",
+                     to_h, (unsigned long long)p->value, data_h,
+                     (unsigned long long)p->safe_nonce, p->kind);
+    if (n < 0 || (size_t)n >= sizeof(body))
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW,
+                      "service: тело запроса");
+
+    tb_http_req_t req = { 0 };
+    strcpy(req.method, "POST");
+    snprintf(req.url, sizeof(req.url), "%s", url);
+    req.body = body;
+    req.body_len = (size_t)n;
+    req.timeout_ms = c->timeout_ms ? c->timeout_ms : 10000;
+
+    tb_http_resp_t *resp = calloc(1, sizeof(*resp));
+    if (!resp)
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "service");
+
+    int rc = -1;
+    if (tb_http_request(h, &req, resp, err) != 0) {
+        TB_ERROR_PROMOTE(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                         "service: транспорт");
+        goto out;
+    }
+    if (resp->status == 201 || resp->status == 200) {
+        rc = 0; /* в очереди */
+        goto out;
+    }
+    {
+        resp->body[resp->body_len < TB_HTTP_BODY_MAX ? resp->body_len
+                                                     : TB_HTTP_BODY_MAX - 1]
+            = '\0';
+        size_t mlen = 0;
+        const char *msg = NULL;
+        /* без JSON-парсера: короткий срез неформатированного ответа */
+        msg = resp->body;
+        mlen = strlen(msg);
+        if (mlen > 160)
+            mlen = 160;
+        char mbuf[192];
+        memcpy(mbuf, msg, mlen);
+        mbuf[mlen] = '\0';
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "service: HTTP %ld: %.160s", (long)resp->status, mbuf);
+    }
+out:
+    free(resp);
+    return rc;
+}

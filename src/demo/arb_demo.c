@@ -401,6 +401,7 @@ typedef struct app {
     tb_arb_t          *arb;
     tb_exec_engine_t  *engine;
     tb_ledger_t       *ledger; /* заимствован: журнал предложений */
+    tb_http_t         *http_for_proposals; /* транспорт публикации */
     tb_u256_t          start_weth;
     const tb_arb_cfg_t *cfg;
     uint64_t           started_ms;
@@ -439,6 +440,26 @@ static void emit_safe_proposal(app_t *d, const tb_safe_proposal_t *p,
     if (d->ledger) {
         tb_error_t lerr = TB_ERROR_INIT;
         tb_ledger_emit(d->ledger, event_type, json, NULL, NULL, &lerr);
+    }
+
+    /* очередь Safe UI (Transaction Service): предложение появляется в
+     * app.safe.global; при пороге 1 одно подтверждение = исполнение.
+     * Ошибка сервиса не ломает конвейер — артефакт уже записан. */
+    if (d->cfg && d->cfg->dex.safe.tx_service_url[0]) {
+        tb_error_t serr = TB_ERROR_INIT;
+        if (tb_safe_service_propose(d->http_for_proposals,
+                                    &d->cfg->dex.safe, p,
+                                    &serr) == 0) {
+            char safe_h[43];
+            tb_addr_to_hex(&p->safe, safe_h, sizeof(safe_h));
+            printf("  в очереди Safe UI: https://app.safe.global/"
+                   "eth:%s/transactions/queue\n",
+                   safe_h);
+        } else {
+            fprintf(stderr, "  сервис очереди недоступен: %s "
+                            "(артефакт-файл действителен)\n",
+                    serr.message);
+        }
     }
 }
 
@@ -740,7 +761,6 @@ int main(int argc, char **argv)
     uint64_t duration_ms = 0; /* 0 = без ограничения по времени */
     bool replay = false;
     bool live_exec = false;
-    bool print_addr = false;
     long web_port = 0; /* 0 = не задан (возьмём из конфига), -1 = --no-web */
 
     for (int i = 1; i < argc; i++) {
@@ -754,8 +774,6 @@ int main(int argc, char **argv)
             replay = true;
         else if (strcmp(argv[i], "--live-exec") == 0)
             live_exec = true;
-        else if (strcmp(argv[i], "--print-addr") == 0)
-            print_addr = true;
         else if (strcmp(argv[i], "--web-port") == 0 && i + 1 < argc)
             web_port = strtol(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--no-web") == 0)
@@ -764,7 +782,7 @@ int main(int argc, char **argv)
             fprintf(stderr,
                     "использование: %s [--config ФАЙЛ] [--ledger ФАЙЛ] "
                     "[--duration МС (0=бессрочно)] [--replay] [--live-exec] "
-                    "[--print-addr] [--web-port N] [--no-web]\n",
+                    "[--web-port N] [--no-web]\n",
                     argv[0]);
             return 2;
         }
@@ -805,41 +823,9 @@ int main(int argc, char **argv)
                  cfg.dex.venues[0].rpc_host_pinned);
     }
 
-    /* ---- ключ бота: env TB_BOT_KEY или network.key_file ---- */
-    if (live_exec || print_addr) {
-        tb_key_t key;
-        if (tb_key_from_env(&key, "TB_BOT_KEY", NULL) != 0) {
-            /* файл: одна строка hex (перевод строки обрезаем) */
-            char hex[128] = {0};
-            FILE *kf = fopen(cfg.key_file[0] ? cfg.key_file : "bot_key.hex",
-                             "r");
-            if (!kf) {
-                fprintf(stderr,
-                        "ключ: задайте TB_BOT_KEY или создайте файл:\n"
-                        "  openssl rand -hex 32 > %s\n",
-                        cfg.key_file[0] ? cfg.key_file : "bot_key.hex");
-                return 1;
-            }
-            if (!fgets(hex, sizeof(hex), kf)) {
-                fprintf(stderr, "ключ: пустой файл\n");
-                fclose(kf);
-                return 1;
-            }
-            fclose(kf);
-            hex[strcspn(hex, " \t\r\n")] = '\0';
-            if (tb_key_from_hex(&key, hex, &err) != 0) {
-                fprintf(stderr, "ключ: %s\n", err.message);
-                return 1;
-            }
-        }
-        cfg.dex.safe.key = key;
-
-        char addr_hex[43];
-        tb_addr_to_hex(&key.address, addr_hex, sizeof(addr_hex));
-        printf("ключ бота: %s\n", addr_hex);
-        if (print_addr)
-            return 0; /* только адрес — для добавления в Safe */
-    }
+    /* ---- безключевая модель (p0.1): приватного ключа нет; если
+     * конфиг ещё просит ключ (live/print-адреса больше не нужно) —
+     * просто идём дальше: бот ничего не подписывает ---- */
 
     app_t app = {0};
     app.replay = replay;
@@ -936,9 +922,12 @@ int main(int argc, char **argv)
     }
 
     /* ---- бэкенд исполнения (движок); котировщик — свой внутри tb_arb ---- */
-    /* propose-only: бэкенд отдаёт предложения сюда (консоль+файл+журнал) */
+    /* propose-only: бэкенд отдаёт предложения сюда (консоль+файл+журнал
+     * + очередь Safe UI); allowance-гейт бэкенда знает рабочий лимит */
+    app.http_for_proposals = http;
     cfg.dex.on_propose = on_dex_proposal;
     cfg.dex.propose_user = &app;
+    cfg.dex.approve_cap_wei = cfg.max_trade_wei * TB_SAFE_APPROVE_MULT;
 
     tb_exec_backend_t dexb_exec;
     if (tb_exec_dex_init(&dexb_exec, http, &cfg.dex, &err) != 0) {
@@ -1025,42 +1014,27 @@ int main(int argc, char **argv)
             return 1;
         }
 
-        /* P0: allowance WETH->роутер. Не хватает рабочего лимита —
-         * ПРЕДЛОЖЕНИЕ approve человеку (бот ничего не исполняет сам).
-         * Лимит ограниченный: max_trade x TB_SAFE_APPROVE_MULT. */
+        /* p0.1-B: allowance-гейт теперь в КАЖДОМ trade-сабмите
+         * бэкенда: не хватит — предложит approve сам и откажет trade
+         * (до подписи approve). Здесь — только предупреждение старта. */
         mkdir("proposals", 0755); /* артефакты; ошибка EEXIST не важна */
-        tb_error_t aerr = TB_ERROR_INIT;
-        tb_u256_t allow;
-        if (tb_safe_allowance(http, &cfg.dex.safe, &cfg.weth,
-                              &cfg.dex.safe.safe, &cfg.dex.safe.router,
-                              &allow, &aerr) == 0) {
-            tb_u256_t want = tb_u256_from_u64(cfg.max_trade_wei);
-            (void)tb_u256_mul_u64(&want, &want, TB_SAFE_APPROVE_MULT);
-            if (tb_u256_cmp(&allow, &want) < 0) {
-                uint8_t cd[4 + 64];
-                size_t cd_len = tb_safe_build_approve(
-                    cd, sizeof(cd), &cfg.dex.safe.router, &want);
-                tb_safe_proposal_t prop;
-                tb_error_t perr = TB_ERROR_INIT;
-                if (cd_len
-                    && tb_safe_propose_exec(http, &cfg.dex.safe, &cfg.weth,
-                                            0, cd, cd_len, tb_now_ms(),
-                                            &prop, &perr) == 0) {
-                    emit_safe_proposal(&app, &prop,
-                                       "safe.proposal.approve");
-                    printf("live: до approve сделки будут ревертиться "
-                           "на transferFrom — подпиши approve первым\n");
-                } else {
-                    fprintf(stderr, "approve-предложение: %s\n",
-                            perr.message);
-                }
+        {
+            tb_error_t aerr = TB_ERROR_INIT;
+            tb_u256_t allow;
+            if (tb_safe_allowance(http, &cfg.dex.safe, &cfg.weth,
+                                  &cfg.dex.safe.safe, &cfg.dex.safe.router,
+                                  &allow, &aerr) == 0) {
+                tb_u256_t want = tb_u256_from_u64(cfg.max_trade_wei);
+                (void)tb_u256_mul_u64(&want, &want, TB_SAFE_APPROVE_MULT);
+                if (tb_u256_cmp(&allow, &want) < 0)
+                    printf("live: allowance WETH->роутера ниже рабочего "
+                           "лимита — при первой сделке бот предложит "
+                           "approve (подпиши его в Safe UI; до этого "
+                           "trade не предлагаются)\n");
+            } else {
+                fprintf(stderr, "live: allowance не прочитан: %s\n",
+                        aerr.message);
             }
-        } else {
-            fprintf(stderr,
-                    "allowance WETH->роутер не прочитан: %s\n"
-                    "  (проверь approve вручную — иначе сделки "
-                    "ревертнутся)\n",
-                    aerr.message);
         }
     }
     tb_wallet_deposit(wallet, &cfg.weth, &start, &err);

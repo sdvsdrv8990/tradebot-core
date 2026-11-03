@@ -4,6 +4,7 @@
  * ========================================================================== */
 #include "tb/events/builtins.h"
 #include "tb/core/error_registry.h"
+#include "tb/core/ids.h" /* tb_group_name для журнала событий */
 #include "tb/core/log.h"
 #include "tb/core/marker.h"
 #include "tb/core/time.h"
@@ -127,6 +128,10 @@ static size_t json_escape_into(const char *in, char *out, size_t cap)
     return n;
 }
 
+/* Формат несёт 7 строк (domain/group/code/severity/message/details/
+ * trace); прежде аргумент code не передавался вовсе и http_status
+ * попадал в %s retryable — strlen(int) => SIGSEGV на любой свежей
+ * сборке (инкрементальная маскировала). */
 static void ledger_observer(tb_evreg_t *r, tb_event_t *ev, void *user)
 {
     tb_ledger_t *ledger = user;
@@ -163,6 +168,7 @@ static void ledger_observer(tb_evreg_t *r, tb_event_t *ev, void *user)
                      tb_ev_state_name((tb_ev_state_t)ev->state),
                      ev->attempts, ev->steps, (unsigned long long)ev->wake_at_ms,
                      tb_domain_name(ev->err.domain),
+                     meta ? tb_group_name(meta->owner) : "UNKNOWN",
                      meta ? meta->name : "UNKNOWN",
                      tb_severity_name((tb_severity_t)ev->err.severity),
                      ev->err.retryable ? "true" : "false",

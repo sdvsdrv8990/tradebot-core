@@ -34,11 +34,24 @@ typedef struct dex_session {
     uint64_t   fill_at_ms; /* shadow: момент заполнения */
     /* live (P0): предложение SafeTx ждёт подписей человека */
     bool       live;
+    bool       superseded; /* заменено новым предложением (тот же nonce) */
     uint64_t   safe_nonce; /* nonce Safe на момент предложения */
     uint64_t   expires_ms; /* окно наблюдения; истекло — отказ без цепи */
     tb_addr_t  out_token;  /* последний токен маршрута */
     tb_u256_t  balance_before; /* для дельты после роста nonce */
 } dex_session_t;
+
+/* Дисциплина p0.1-B: одно живое предложение на Safe. Пока человек не
+ * исполнил (nonce не вырос) и окно не истекло, новое предложение
+ * ЗАМЕНЯЕТ старое (тот же nonce); параллельные конкурирующие nonce не
+ * постим. Живой неподписанный approve блокирует trade-предложения. */
+typedef struct dex_live_prop {
+    bool      active;        /* живо предложение (trade или approve) */
+    bool      approve;       /* живой approve (торговля заблокирована) */
+    uint64_t  safe_nonce;
+    uint64_t  expires_ms;
+    uint64_t  tx_id;         /* сессия, чьё предложение живо */
+} dex_live_prop_t;
 
 typedef struct dex_ctx {
     tb_exec_dex_cfg_t cfg;
@@ -46,6 +59,7 @@ typedef struct dex_ctx {
     uint64_t          rand_state;
     uint64_t          next_tx;
     dex_session_t     txs[TB_DEX_MAX_SESSIONS];
+    dex_live_prop_t   live; /* поток-владелец движка */
     tb_exec_dex_stats_t stats;
 } dex_ctx_t;
 
@@ -531,10 +545,84 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
     }
 
     if (c->cfg.live) {
-        /* ---- live = propose-only (P0): подготовить SafeTx для подписи
-         * человеком; ничего не отправляем. Исполнение человек делает
-         * второй подписью в кошельке; результат узнаем ростом nonce
-         * и дельтой баланса. ---- */
+        /* ---- live = propose-only, дисциплина p0.1-B:
+         * 1) allowance-гейт: не хватает на ставку → предложить approve
+         *    (если он ещё не жив) и ОТКАЗАТЬ trade;
+         * 2) живой approve → trade не предлагается вовсе;
+         * 3) одно живое предложение: новое заменяет старое (тот же
+         *    nonce), старая сессия помечается superseded;
+         * 4) nonce на цепи вырос → прежнее исполнено, состояние
+         *    сбрасывается (allowance перечитается этим же гейтом). ---- */
+        dex_live_prop_t *lp = &c->live;
+
+        /* nonce на цепи: вырос — прежнее живое предложение исполнено */
+        {
+            uint64_t nonce = 0;
+            tb_error_t nerr = TB_ERROR_INIT;
+            if (tb_safe_nonce(c->http, &c->cfg.safe, &nonce, &nerr) != 0) {
+                *err = nerr;
+                return -1;
+            }
+            if (lp->active && nonce > lp->safe_nonce) {
+                lp->active = false;
+                lp->approve = false; /* исполнено (approve в том числе) */
+            }
+            if (lp->active && now_ms > lp->expires_ms) {
+                lp->active = false; /* окно истекло — не ждём */
+                lp->approve = false;
+            }
+        }
+
+        /* allowance-гейт перед КАЖДЫМ trade-предложением */
+        tb_u256_t allow;
+        tb_error_t aerr = TB_ERROR_INIT;
+        tb_addr_t in_tok = tb_route_token(route, 0);
+        if (tb_safe_allowance(c->http, &c->cfg.safe, &in_tok,
+                              &c->cfg.safe.safe, &c->cfg.safe.router,
+                              &allow, &aerr) != 0) {
+            *err = aerr;
+            return -1;
+        }
+        if (tb_u256_cmp(&allow, amount_in) < 0) {
+            tb_atomic_add_u64(&c->stats.allowance_gates, 1);
+            if (lp->active && lp->approve)
+                TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                              "dex: allowance ниже ставки — approve уже "
+                              "предложен, подпиши его в Safe UI");
+            /* предложить approve на рабочий лимит и отказать trade */
+            tb_u256_t cap = c->cfg.approve_cap_wei
+                                ? tb_u256_from_u64(c->cfg.approve_cap_wei)
+                                : *amount_in;
+            uint8_t cd[4 + 64];
+            size_t cd_len = tb_safe_build_approve(cd, sizeof(cd),
+                                                  &c->cfg.safe.router,
+                                                  &cap);
+            tb_safe_proposal_t ap;
+            if (cd_len
+                && tb_safe_propose_exec(c->http, &c->cfg.safe, &in_tok, 0,
+                                        cd, cd_len, now_ms, &ap,
+                                        err) == 0) {
+                snprintf(ap.kind, sizeof(ap.kind), "approve");
+                tb_atomic_add_u64(&c->stats.proposals, 1);
+                if (c->cfg.on_propose)
+                    c->cfg.on_propose(&ap, c->cfg.propose_user);
+                lp->active = true;
+                lp->approve = true;
+                lp->safe_nonce = ap.safe_nonce;
+                lp->expires_ms = ap.expires_at_ms;
+                lp->tx_id = 0;
+            }
+            TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                          "dex: allowance WETH->роутера ниже ставки — "
+                          "предложен approve, подпиши в Safe UI");
+        }
+
+        /* живой approve без исполнения: trade в очередь не ставим */
+        if (lp->active && lp->approve)
+            TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                          "dex: ждём подписи approve — trade не "
+                          "предлагается");
+
         dex_session_t *s = NULL;
         for (size_t i = 0; i < TB_DEX_MAX_SESSIONS; i++)
             if (c->txs[i].tx_id == 0) {
@@ -571,6 +659,14 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
         if (c->cfg.on_propose)
             c->cfg.on_propose(&prop, c->cfg.propose_user);
 
+        /* прежнее живое trade-предложение заменено (nonce тот же) */
+        if (lp->active && lp->tx_id) {
+            for (size_t i = 0; i < TB_DEX_MAX_SESSIONS; i++)
+                if (c->txs[i].tx_id == lp->tx_id && c->txs[i].live)
+                    c->txs[i].superseded = true;
+            tb_atomic_add_u64(&c->stats.supersedes, 1);
+        }
+
         memset(s, 0, sizeof(*s));
         s->tx_id = ++c->next_tx;
         s->live = true;
@@ -579,6 +675,12 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
         s->out_token = out_tok;
         s->balance_before = before;
         s->amount_out = out; /* оценка; истина придёт дельтой в poll */
+
+        lp->active = true;
+        lp->approve = false;
+        lp->safe_nonce = prop.safe_nonce;
+        lp->expires_ms = prop.expires_at_ms;
+        lp->tx_id = s->tx_id;
 
         *tx_id = s->tx_id;
         *amount_out = out;
@@ -625,6 +727,13 @@ static int dex_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
                       (unsigned long long)tx_id);
 
     if (s->live) {
+        /* Заменено новым предложением того же nonce — отказ старого */
+        if (s->superseded) {
+            s->tx_id = 0;
+            TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                          "dex: предложение заменено более свежим "
+                          "(тот же nonce)");
+        }
         /* Предложение ждёт человека: следим за nonce Safe. Истекло окно
          * — отказ: на цепи ничего не было, газ не потрачен. */
         if (now_ms > s->expires_ms) {
@@ -653,6 +762,9 @@ static int dex_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
             memset(amount_out, 0, sizeof(*amount_out)); /* стало меньше */
 
         s->tx_id = 0;
+        /* исполнение = рост nonce: живое предложение этого ctx закрыто */
+        c->live.active = false;
+        c->live.approve = false;
         tb_atomic_add_u64(&c->stats.fills, 1);
         return 0; /* исполнено человеком: фактическая дельта */
     }
