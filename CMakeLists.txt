@@ -240,6 +240,14 @@ target_link_libraries(test_exec PRIVATE tb_runtime)
 add_test(NAME test_exec COMMAND test_exec)
 set_tests_properties(test_exec PROPERTIES TIMEOUT 30)
 
+# stop-storm (H1.3): скрипт — 6 остановок в разные моменты первого
+# батча; провал = segfault/KILL/иной код (124 — норма выхода по TERM)
+add_test(NAME stop_storm
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/stop_storm.sh
+                  $<TARGET_FILE:arb_demo> ${CMAKE_BINARY_DIR})
+set_tests_properties(stop_storm PROPERTIES TIMEOUT 90
+                     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # честный replay: экономика мока без арбитражного окна (дефолт) —
 # конвейер обязан найти НОЛЬ сделок; таймаут щедрый на медленных CI
 add_test(NAME replay_honest

@@ -78,6 +78,19 @@ typedef struct tb_exec_dex_venue {
 typedef void (*tb_exec_dex_proposal_cb)(const tb_safe_proposal_t *p,
                                         void *user);
 
+/* settlement v2 (H1.5): атрибуция исполнения конкретному предложению
+ * по событиям Safe (ExecutionSuccess/Failure, topic1 = safeTxHash).
+ * Вызывается из потока poll движка при росте nonce. */
+typedef struct tb_exec_dex_execution {
+    bool      found;          /* событие нашего предложения найдено */
+    bool      success;        /* ExecutionSuccess (иначе Failure) */
+    uint64_t  block;
+    uint8_t   safe_tx_hash[32];
+    tb_u256_t balance_delta;  /* фактическая дельта (сумма расчёта) */
+} tb_exec_dex_execution_t;
+typedef void (*tb_exec_dex_execution_cb)(const tb_exec_dex_execution_t *e,
+                                         void *user);
+
 typedef struct tb_exec_dex_cfg {
     tb_exec_dex_venue_t venues[TB_DEX_MAX_VENUES];
     uint32_t            venues_n;
@@ -96,6 +109,8 @@ typedef struct tb_exec_dex_cfg {
     bool                live;
     tb_exec_dex_proposal_cb on_propose;
     void               *propose_user;
+    tb_exec_dex_execution_cb on_execution; /* атрибуция исполнения */
+    void               *execution_user;
     uint64_t            approve_cap_wei; /* рабочий лимит approve
                                           * (max_trade x MULT); 0 ->
                                           * approve ровно на ставку */

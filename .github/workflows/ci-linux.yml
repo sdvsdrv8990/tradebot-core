@@ -29,6 +29,10 @@ jobs:
             c: gcc
             cxx: g++
             flags: "-fsanitize=undefined -fno-sanitize-recover=all -g"
+          - name: gcc-asan
+            c: gcc
+            cxx: g++
+            flags: "-fsanitize=address -fno-omit-frame-pointer -g"
 
     steps:
       - uses: actions/checkout@v4

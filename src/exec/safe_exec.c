@@ -587,6 +587,19 @@ int tb_safe_service_propose(tb_http_t *h, const tb_safe_cfg_t *c,
         rc = 0; /* в очереди */
         goto out;
     }
+    if (resp->status == 429) {
+        /* тарифный лимит сервиса очередей (бесплатный тариф Safe
+         * TX Service — 5 req/s): лимит НЕ хардкодим на клиенте, но
+         * причина должна быть мгновенно читаемой при диагностике.
+         * retryable/retry_after — ПОСЛЕ TB_ERROR_SET (макрос
+         * перезаполняет поля ошибки) */
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "сервис очереди: лимит запросов (HTTP 429%s)",
+                     resp->retry_after_ms ? ", Retry-After получен" : "");
+        err->retryable = true;
+        err->retry_after_ms = resp->retry_after_ms;
+        goto out;
+    }
     {
         resp->body[resp->body_len < TB_HTTP_BODY_MAX ? resp->body_len
                                                      : TB_HTTP_BODY_MAX - 1]
@@ -604,6 +617,157 @@ int tb_safe_service_propose(tb_http_t *h, const tb_safe_cfg_t *c,
         TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                      "service: HTTP %ld: %.160s", (long)resp->status, mbuf);
     }
+out:
+    free(resp);
+    return rc;
+}
+
+/* ---- Атрибуция исполнения (settlement v2, H1.5) ----
+ * ExecutionSuccess(bytes32 txHash, uint256 payment) /
+ * ExecutionFailure(bytes32 txHash, uint256 payment): topic0 — keccak
+ * подписи, topic1 = safeTxHash (indexed). Ищем оба, фильтр по нашему
+ * хешу; события контракта Safe — истина, индексер не участвует. */
+
+static void topic0_exec_success(uint8_t out[32])
+{
+    tb_keccak256("ExecutionSuccess(bytes32,uint256)",
+                 sizeof("ExecutionSuccess(bytes32,uint256)") - 1, out);
+}
+
+static void topic0_exec_failure(uint8_t out[32])
+{
+    tb_keccak256("ExecutionFailure(bytes32,uint256)",
+                 sizeof("ExecutionFailure(bytes32,uint256)") - 1, out);
+}
+
+/* topic1 (safeTxHash) из записи лога: topics[1] hex 64 символа */
+static const char *log_topic1(const char *entry)
+{
+    const char *t = strstr(entry, "\"topics\":[");
+    if (!t)
+        return NULL;
+    t = strstr(t, "\"0x");
+    if (!t)
+        return NULL;
+    t = strstr(t + 3, "\"0x"); /* topics[1] */
+    return t ? t + 1 : NULL; /* на '0x...' (включая префикс) */
+}
+
+static bool hex64_eq(const char *hex64, const uint8_t want[32])
+{
+    if (!hex64)
+        return false;
+    if (strncmp(hex64, "0x", 2) != 0)
+        return false;
+    for (int i = 0; i < 32; i++) {
+        char b[3] = { hex64[2 + i * 2], hex64[2 + i * 2 + 1], 0 };
+        char w[3];
+        sprintf(w, "%02x", want[i]);
+        if (b[0] != w[0] || b[1] != w[1]) {
+            /* допускаем верхний регистр в ответе узла */
+            if ((b[0] | 0x20) != w[0] || (b[1] | 0x20) != w[1])
+                return false;
+        }
+    }
+    return true;
+}
+
+static uint64_t hex_blocknum(const char *entry)
+{
+    const char *b = strstr(entry, "\"blockNumber\":\"0x");
+    if (!b)
+        return 0;
+    return strtoull(b + 17, NULL, 16);
+}
+
+int tb_safe_execution_status(tb_http_t *h, const tb_safe_cfg_t *c,
+                             const uint8_t safe_tx_hash[32],
+                             uint64_t from_block, bool *found,
+                             bool *success, uint64_t *block,
+                             tb_error_t *err)
+{
+    *found = false;
+    *success = false;
+    *block = 0;
+
+    char safe_h[43];
+    tb_addr_to_hex(&c->safe, safe_h, sizeof(safe_h));
+    uint8_t ok_t[32], fail_t[32];
+    topic0_exec_success(ok_t);
+    topic0_exec_failure(fail_t);
+    char ok_h[67], fail_h[67], want_h[67];
+    for (int i = 0; i < 32; i++) {
+        sprintf(ok_h + 2 + i * 2, "%02x", ok_t[i]);
+        sprintf(fail_h + 2 + i * 2, "%02x", fail_t[i]);
+        sprintf(want_h + 2 + i * 2, "%02x", safe_tx_hash[i]);
+    }
+    ok_h[0] = fail_h[0] = want_h[0] = '0';
+    ok_h[1] = fail_h[1] = want_h[1] = 'x';
+
+    static char body[512];
+    int n = snprintf(body, sizeof(body),
+                     "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getLogs\","
+                     "\"params\":[{\"address\":\"%s\","
+                     "\"fromBlock\":\"0x%llx\",\"toBlock\":\"latest\","
+                     "\"topics\":[[\"%s\",\"%s\"],\"%s\"]}],\"id\":1}",
+                     safe_h, (unsigned long long)from_block, ok_h, fail_h,
+                     want_h);
+    if (n < 0 || (size_t)n >= sizeof(body))
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW, "getLogs");
+
+    tb_http_req_t req = { 0 };
+    strcpy(req.method, "POST");
+    strcpy(req.url, c->rpc_url);
+    if (c->rpc_host_pinned[0])
+        strcpy(req.host_pinned, c->rpc_host_pinned);
+    req.body = body;
+    req.body_len = (size_t)n;
+    req.timeout_ms = c->timeout_ms ? c->timeout_ms : 10000;
+
+    tb_http_resp_t *resp = calloc(1, sizeof(*resp));
+    if (!resp)
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "getLogs");
+    int rc = -1;
+    if (tb_http_request(h, &req, resp, err) != 0) {
+        TB_ERROR_PROMOTE(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                         "getLogs: транспорт");
+        goto out;
+    }
+    resp->body[resp->body_len < TB_HTTP_BODY_MAX ? resp->body_len
+                                                 : TB_HTTP_BODY_MAX - 1]
+        = '\0';
+    if (strstr(resp->body, "\"error\"")) {
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "getLogs: %.96s", resp->body);
+        goto out;
+    }
+
+    /* скан записей: адрес-хеш совпадает и topic0 различает исход */
+    {
+        const char *p = resp->body;
+        while ((p = strstr(p, "\"blockNumber\"")) != NULL) {
+            const char *entry_start = p;
+            /* границы записи: назад до '{' */
+            while (entry_start > resp->body && *entry_start != '{')
+                entry_start--;
+            const char *t1 = log_topic1(entry_start);
+            if (!hex64_eq(t1, safe_tx_hash))
+                goto next;
+            if (strstr(entry_start, ok_h))
+                *success = true; /* ExecutionSuccess: наш хеш исполнился */
+            else if (strstr(entry_start, fail_h))
+                *success = false; /* ExecutionFailure */
+            else
+                goto next; /* чужой topic0 — не должно случаться */
+            *found = true;
+            *block = hex_blocknum(entry_start);
+            rc = 0;
+            goto out;
+        next:
+            p += 13;
+        }
+    }
+    rc = 0; /* событий нашего хеша нет — found=false, это не ошибка */
 out:
     free(resp);
     return rc;

@@ -105,13 +105,18 @@ static uint64_t grid_step(const tb_u256_t *floor, const tb_u256_t *cap)
     return 1024;
 }
 
-/* Одна проба с учётом бюджета; 0 — проба сделана, -1 — бюджет исчерпан */
+/* Одна проба с учётом бюджета; 0 — проба сделана, -1 — бюджет
+ * исчерпан (заполняет *budget_hit: res->incomplete, вердикт
+ * «невыгодно» при неполном поиске запрещён — H1.1) */
 static int probe(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
                  tb_arb_quote_fn quote, void *qctx, const tb_u256_t *size,
-                 probe_res_t *pr, uint32_t *probes, tb_error_t *err)
+                 probe_res_t *pr, uint32_t *probes, bool *budget_hit,
+                 tb_error_t *err)
 {
-    if (*probes >= TB_DEC_PROBE_BUDGET)
+    if (*probes >= TB_DEC_PROBE_BUDGET) {
+        *budget_hit = true;
         return -1;
+    }
     int rc = eval_size(cfg, p, quote, qctx, size, pr, err);
     (*probes)++;
     pr->size = *size;
@@ -124,7 +129,8 @@ static int probe(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
 static void refine_entry(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
                          tb_arb_quote_fn quote, void *qctx,
                          tb_u256_t a, tb_u256_t b, probe_res_t *best,
-                         uint32_t *probes, tb_error_t *err)
+                         uint32_t *probes, bool *budget_hit,
+                         tb_error_t *err)
 {
     probe_res_t pr;
     for (;;) {
@@ -143,9 +149,12 @@ static void refine_entry(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
             return;
         if (tb_u256_cmp(&mid, &a) <= 0 || tb_u256_cmp(&mid, &b) >= 0)
             return;
-        if (probe(cfg, p, quote, qctx, &mid, &pr, probes, err) < 0)
-            return; /* ошибка котировщика при уточнении — оставляем
-                     * лучшее известное (скан уже дал границы) */
+        if (probe(cfg, p, quote, qctx, &mid, &pr, probes, budget_hit,
+                  err)
+            < 0)
+            return; /* бюджет/ошибка при уточнении — оставляем лучшее
+                     * известное (скан уже дал границы); бюджет
+                     * пометит результат неполным */
         if (pr.rc == 1) {
             b = mid;
             *best = pr; /* минимальное рентабельное пока — это b */
@@ -160,7 +169,8 @@ static void refine_entry(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
 static void refine_peak(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
                         tb_arb_quote_fn quote, void *qctx,
                         tb_u256_t lo, tb_u256_t hi, probe_res_t *best,
-                        uint32_t *probes, tb_error_t *err)
+                        uint32_t *probes, bool *budget_hit,
+                        tb_error_t *err)
 {
     probe_res_t r1, r2;
     for (;;) {
@@ -183,8 +193,12 @@ static void refine_peak(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
         if (tb_u256_cmp(&m1, &lo) <= 0 || tb_u256_cmp(&m2, &m1) <= 0
             || tb_u256_cmp(&hi, &m2) <= 0)
             return;
-        if (probe(cfg, p, quote, qctx, &m1, &r1, probes, err) < 0
-            || probe(cfg, p, quote, qctx, &m2, &r2, probes, err) < 0)
+        if (probe(cfg, p, quote, qctx, &m1, &r1, probes, budget_hit,
+                  err)
+                < 0
+            || probe(cfg, p, quote, qctx, &m2, &r2, probes, budget_hit,
+                     err)
+                   < 0)
             return;
         if (r1.rc == 1 && tb_u256_cmp(&r1.profit, &best->profit) > 0)
             *best = r1;
@@ -242,6 +256,7 @@ int tb_arb_eval_pair(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
     int grid_n = 0;
     uint32_t probes = 0;
     uint32_t grid_err = 0;
+    bool budget_hit = false;
 
     uint64_t s = grid_step(&lo, &hi);
     tb_u256_t cur = lo;
@@ -257,7 +272,7 @@ int tb_arb_eval_pair(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
         if (grid_n > 0 && tb_u256_cmp(&amt, &grid[grid_n - 1]) == 0)
             break; /* упёрлись в cap раньше — сетка короче */
         int rc = probe(cfg, p, quote, qctx, &amt, &gp[grid_n], &probes,
-                       err);
+                       &budget_hit, err);
         if (rc < 0) {
             grid_err++;
             gp[grid_n].rc = 0; /* нет данных = нерентабельная точка */
@@ -304,6 +319,15 @@ int tb_arb_eval_pair(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
         i = j + 1;
     }
     if (ivs_n == 0) {
+        if (budget_hit) {
+            /* сетка обрезана бюджетом: узкие окна между точками могли
+             * быть пропущены — честный исход «неполон», не «невыгодно» */
+            res->probes = probes;
+            res->incomplete = true;
+            snprintf(res->reason, sizeof(res->reason),
+                     "поиск неполон: бюджет проб на пустой сетке");
+            return 0;
+        }
         snprintf(res->reason, sizeof(res->reason),
                  "нет прибыли в диапазоне");
         res->probes = probes;
@@ -327,7 +351,8 @@ int tb_arb_eval_pair(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
             min_entry = grid[iv->lo_i];
             if (iv->entry_bracket) {
                 refine_entry(cfg, p, quote, qctx, grid[iv->lo_bracket_i],
-                             grid[iv->lo_i], &min_pr, &probes, err);
+                             grid[iv->lo_i], &min_pr, &probes,
+                             &budget_hit, err);
                 min_entry = min_pr.size; /* уточнённый вход */
             }
         }
@@ -343,7 +368,7 @@ int tb_arb_eval_pair(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
         if (iv->exit_bracket)
             pk_hi = grid[iv->hi_bracket_i];
         refine_peak(cfg, p, quote, qctx, pk_lo, pk_hi, &loc_pr, &probes,
-                    err);
+                    &budget_hit, err);
         if (tb_u256_cmp(&loc_pr.profit, &best_pr.profit) > 0) {
             best_pr = loc_pr;
             best_size = loc_pr.size;
@@ -359,6 +384,8 @@ int tb_arb_eval_pair(const tb_arb_cfg_t *cfg, const tb_arb_pair_in_t *p,
     res->opt_sell_out = best_pr.sell_out;
     res->opt_profit = best_pr.profit;
     res->probes = probes;
+    res->incomplete = budget_hit; /* найденное достоверно, глобальность
+                                   * не гарантирована — журнал помечает */
 
     /* min_out = opt_size + gas + min_profit + opt_size×RISK/10000:
      * исполнение ниже пола = чистая прибыль ниже требуемой → реверт */

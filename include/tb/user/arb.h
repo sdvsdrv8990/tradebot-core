@@ -254,6 +254,9 @@ typedef struct tb_arb_pair_res {
     tb_u256_t min_out;    /* пол ордера: opt_size + gas + required */
     uint64_t  gas_cost_wei; /* газ, использованный в расчёте */
     uint32_t  probes;     /* итераций поиска размера */
+    bool      incomplete; /* бюджет проб исчерпан: найденное достоверно,
+                           * но глобальность не гарантирована — журнал
+                           * помечает, вердикт «невыгодно» запрещён */
 } tb_arb_pair_res_t;
 
 /* Оценить пару: точные цепные котировки через quote_fn. Фаза A ищет
@@ -275,6 +278,10 @@ typedef struct tb_arb_stats {
     uint64_t pairs_evaluated;
     uint64_t pairs_profitable;
     uint64_t quote_errors;     /* пар отброшено по ошибке котировщика */
+    uint64_t search_incomplete;/* пар с неполным поиском (бюджет RPC/проб) */
+    uint64_t rpc_cache_hit, rpc_cache_miss;      /* кеш хопов фазы решения */
+    uint64_t rpc_duplicate_miss;  /* конкурентный двойной miss (съел бюджет) */
+    uint64_t rpc_budget_exhausted;/* отказов хопам по бюджету RPC батча */
     uint64_t orders_submitted;
     uint64_t orders_canceled; /* отмены по невыгодности */
     uint64_t cancel_fee_wei;  /* моделируемый потерянный газ */

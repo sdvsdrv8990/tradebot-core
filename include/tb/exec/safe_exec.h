@@ -141,6 +141,18 @@ int tb_safe_allowance(tb_http_t *h, const tb_safe_cfg_t *c,
                       const tb_addr_t *spender, tb_u256_t *out,
                       tb_error_t *err);
 
+/* Атрибуция исполнения (settlement v2, H1.5): рост nonce + дельта
+ * баланса не доказывают, что исполнилось ИМЕННО наше предложение.
+ * eth_getLogs(Safe, ExecutionSuccess|ExecutionFailure, от блока
+ * from_block) с фильтром topic1 = safe_tx_hash. Результат: found —
+ * событие нашего предложения есть; success — успех или отказ.
+ * Истина остаётся на цепи (события контракта Safe). */
+int tb_safe_execution_status(tb_http_t *h, const tb_safe_cfg_t *c,
+                             const uint8_t safe_tx_hash[32],
+                             uint64_t from_block, bool *found,
+                             bool *success, uint64_t *block,
+                             tb_error_t *err);
+
 #ifdef __cplusplus
 }
 #endif

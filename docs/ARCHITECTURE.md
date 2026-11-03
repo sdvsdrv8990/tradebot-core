@@ -597,8 +597,10 @@ rapidjson): venues (RPC + quoter + пулы + host_pinned), watchlist
 `docs/arb_config.example.json`.
 
 Демо: `arb_demo` (живой режим — реальные котировки; `--replay` —
-локальный mock-RPC с синтетическим спредом ~0.7%, полный конвейер с
-гарантированной сделкой). Тесты: `test_net`, `test_backend_dex`,
+локальный mock-RPC с ЧЕСТНОЙ экономикой: реальные комиссии, круг
+через один пул в минус, окно TB_MOCK_SPREAD_BN; мок — стенд
+конвейера, НЕ модель реальных AMM: корреляции/глубина/межблочное
+движение не моделируются). Тесты: `test_net`, `test_backend_dex`,
 `test_filters`, `test_decision`, `test_config`.
 
 ## 10. Исполнение из Safe: бот готовит, человек подписывает (v0.5, P0)
