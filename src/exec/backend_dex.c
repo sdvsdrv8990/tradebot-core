@@ -37,6 +37,8 @@ typedef struct dex_session {
     bool       superseded; /* заменено новым предложением (тот же nonce) */
     uint64_t   safe_nonce; /* nonce Safe на момент предложения */
     uint64_t   expires_ms; /* окно наблюдения; истекло — отказ без цепи */
+    uint8_t    safe_tx_hash[32]; /* атрибуция исполнения (H1.5) */
+    uint64_t   born_block;  /* блок создания (getLogs от него) */
     tb_addr_t  out_token;  /* последний токен маршрута */
     tb_u256_t  balance_before; /* для дельты после роста nonce */
 } dex_session_t;
@@ -672,6 +674,8 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
         s->live = true;
         s->safe_nonce = prop.safe_nonce;
         s->expires_ms = prop.expires_at_ms;
+        memcpy(s->safe_tx_hash, prop.safe_tx_hash, 32);
+        s->born_block = 0; /* заполнит первый poll (нужно после роста) */
         s->out_token = out_tok;
         s->balance_before = before;
         s->amount_out = out; /* оценка; истина придёт дельтой в poll */
@@ -760,6 +764,40 @@ static int dex_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
         }
         if (!tb_u256_sub(amount_out, &after, &s->balance_before))
             memset(amount_out, 0, sizeof(*amount_out)); /* стало меньше */
+
+        /* атрибуция (H1.5): событие ExecutionSuccess/Failure нашего
+         * safeTxHash доказывает, что исполнилось ИМЕННО наше
+         * предложение; рост nonce сам по себе — только сигнал */
+        if (c->cfg.on_execution) {
+            uint64_t cur_block = 0;
+            {
+                /* хеш-грубость: getLogs от текущего блока назад на
+                 * окно наблюдения (30 мин майнинта ~ 600 блоков; 4096
+                 * с запасом на медленные цепи) */
+                tb_exec_dex_venue_t v = { 0 };
+                snprintf(v.name, sizeof(v.name), "safe-rpc");
+                snprintf(v.rpc_url, sizeof(v.rpc_url), "%s",
+                         c->cfg.safe.rpc_url);
+                if (c->cfg.safe.rpc_host_pinned[0])
+                    snprintf(v.rpc_host_pinned, sizeof(v.rpc_host_pinned),
+                             "%s", c->cfg.safe.rpc_host_pinned);
+                tb_error_t blkh = TB_ERROR_INIT;
+                (void)tb_exec_dex_block_number(c->http, &v, &cur_block,
+                                               &blkh);
+            }
+            tb_exec_dex_execution_t ex = { 0 };
+            ex.balance_delta = *amount_out;
+            memcpy(ex.safe_tx_hash, s->safe_tx_hash, 32);
+            tb_error_t serr2 = TB_ERROR_INIT;
+            uint64_t from = cur_block > 4096 ? cur_block - 4096 : 0;
+            if (tb_safe_execution_status(c->http, &c->cfg.safe,
+                                         s->safe_tx_hash, from, &ex.found,
+                                         &ex.success, &ex.block,
+                                         &serr2) == 0)
+                c->cfg.on_execution(&ex, c->cfg.execution_user);
+            /* ошибка getLogs не ломает расчёт: дельта уже есть, но
+             * журнал получит found=false (атрибуция не доказана) */
+        }
 
         s->tx_id = 0;
         /* исполнение = рост nonce: живое предложение этого ctx закрыто */

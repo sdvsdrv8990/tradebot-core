@@ -513,6 +513,17 @@ static void emit_safe_proposal(app_t *d, const tb_safe_proposal_t *p,
             fprintf(stderr, "  сервис очереди недоступен: %s "
                             "(артефакт-файл действителен)\n",
                     serr.message);
+            if (strstr(serr.message, "429") && d->ledger) {
+                /* упёрлись в тариф сервиса: фиксируем отдельно —
+                 * источник проблемы должен быть виден из журнала */
+                char p4[96];
+                snprintf(p4, sizeof(p4),
+                         "{\"retry_after_ms\":%u}",
+                         serr.retry_after_ms);
+                tb_error_t l4 = TB_ERROR_INIT;
+                tb_ledger_emit(d->ledger, "safe.queue_limited", p4,
+                               NULL, NULL, &l4);
+            }
         }
     }
 }
@@ -520,6 +531,37 @@ static void emit_safe_proposal(app_t *d, const tb_safe_proposal_t *p,
 static void on_dex_proposal(const tb_safe_proposal_t *p, void *user)
 {
     emit_safe_proposal(user, p, "safe.proposal.trade");
+}
+
+/* settlement v2 (H1.5): событие Safe доказывает, что исполнилось
+ * именно НАШЕ предложение; дельта баланса — сумма расчёта */
+static void on_dex_execution(const tb_exec_dex_execution_t *e, void *user)
+{
+    app_t *d = user;
+    if (!d->ledger)
+        return;
+    char h[67];
+    h[0] = '0';
+    h[1] = 'x';
+    for (int i = 0; i < 32; i++)
+        sprintf(h + 2 + i * 2, "%02x", e->safe_tx_hash[i]);
+    char dl[80];
+    tb_u256_to_dec(&e->balance_delta, dl, sizeof(dl));
+    char pay[420];
+    snprintf(pay, sizeof(pay),
+             "{\"safe_tx_hash\":\"%s\",\"attributed\":%s,"
+             "\"outcome\":\"%s\",\"block\":%llu,\"delta_wei\":\"%s\"}",
+             h, e->found ? "true" : "false",
+             e->found ? (e->success ? "executed" : "rejected") : "unknown",
+             (unsigned long long)e->block, dl);
+    tb_error_t lerr = TB_ERROR_INIT;
+    tb_ledger_emit(d->ledger, e->found && e->success ? "safe.executed"
+                                                     : "safe.rejected",
+                   pay, NULL, NULL, &lerr);
+    if (!e->found)
+        tb_ledger_emit(d->ledger, "safe.unattributed", pay, NULL, NULL,
+                       &lerr); /* nonce вырос, но события нашего хеша
+                                * нет: исполнилось другое предложение */
 }
 
 static app_t g_app;
@@ -993,6 +1035,8 @@ int main(int argc, char **argv)
     app.http_for_proposals = http;
     cfg.dex.on_propose = on_dex_proposal;
     cfg.dex.propose_user = &app;
+    cfg.dex.on_execution = on_dex_execution;
+    cfg.dex.execution_user = &app;
     cfg.dex.approve_cap_wei = cfg.max_trade_wei * TB_SAFE_APPROVE_MULT;
 
     tb_exec_backend_t dexb_exec;

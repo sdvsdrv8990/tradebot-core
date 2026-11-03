@@ -20,6 +20,7 @@
 #include "harness.h"
 #include "tb/arch/arch.h"
 #include "tb/core/error.h"
+#include "tb/core/keccak.h"
 #include "tb/core/time.h"
 #include "tb/exec/backend_dex.h"
 #include "tb/exec/safe_exec.h"
@@ -50,9 +51,14 @@ typedef struct mock {
     volatile bool stop;
     int sendraw_count;   /* попыток отправки tx: обязано быть НУЛЁМ */
     int service_posts;   /* публикаций в очередь Safe UI */
+    int service_429;     /* N первых постов отвечать 429 (тариф) */
     uint64_t safe_nonce; /* nonce(); тест «исполняет» движением */
     uint64_t balance;    /* balanceOf */
     uint64_t allowance;  /* allowance(WETH, Safe -> router) */
+    int logs_mode;       /* getLogs: 0 пусто, 1 Success, 2 Failure */
+    char want_hash[67];  /* topic1 из запроса (эхо в ответе) */
+    char want_topic0[67];/* topic0 исхода (тест считает keccak) */
+    char ok_topic0[67], fail_topic0[67];
 } mock_t;
 
 static void serve(mock_t *m, int c)
@@ -82,8 +88,48 @@ static void serve(mock_t *m, int c)
     if (strncmp(req, "POST /api/v1/", 13) == 0) {
         /* Safe Transaction Service: предложение в очередь */
         m->service_posts++;
+        if (m->service_429 > 0) {
+            m->service_429--;
+            n = 0;
+            char h4[192];
+            int h4n = snprintf(h4, sizeof(h4),
+                               "HTTP/1.1 429 Too Many Requests\r\n"
+                               "Content-Type: application/json\r\n"
+                               "Retry-After: 2\r\nContent-Length: 0\r\n"
+                               "Connection: close\r\n\r\n");
+            send(c, h4, (size_t)h4n, 0);
+            close(c);
+            return;
+        }
         n = snprintf(out, sizeof(out), "{}");
         hdr_extra = "X-Queued: 1";
+    } else if (strstr(body, "eth_getLogs")) {
+        /* topic1 (искомый хеш) — после "]," в topics */
+        {
+            const char *w = strstr(body, "],\"0x");
+            snprintf(m->want_hash, sizeof(m->want_hash), "%s", "0x");
+            if (w) {
+                /* w+3='0', w+4='x' -> hex с w+5 */
+                strncat(m->want_hash, w + 5, 64);
+                m->want_hash[66] = '\0';
+            }
+        }
+        snprintf(m->want_topic0, sizeof(m->want_topic0), "%s",
+                 m->logs_mode == 2 ? m->fail_topic0 : m->ok_topic0);
+        if (m->logs_mode == 0) {
+            n = snprintf(out, sizeof(out), "{\"id\":1,\"result\":[]}");
+        } else {
+            /* topic0 по режиму; реальные топики посчитает тест через
+             * tb_keccak256 и подсунет через want_topic0 */
+            n = snprintf(out, sizeof(out),
+                         "{\"id\":1,\"result\":[{\"address\":\"0x%.40s\","
+                         "\"topics\":[\"%s\",\"%s\"],"
+                         "\"blockNumber\":\"0x9\",\"data\":\"0x\"}]}",
+                         "1111111111111111111111111111111111111111",
+                         m->want_topic0, m->want_hash);
+        }
+    } else if (strstr(body, "eth_blockNumber")) {
+        n = snprintf(out, sizeof(out), "{\"id\":1,\"result\":\"0x10\"}");
     } else if (strstr(body, "eth_sendRawTransaction")) {
         m->sendraw_count++;
         n = snprintf(out, sizeof(out),
@@ -141,7 +187,23 @@ static void mock_start(mock_t *m)
     m->service_posts = 0;
     m->safe_nonce = 5;
     m->balance = 1000;
-    m->allowance = 0; /* старт без approve: гейт должен сработать */
+    m->allowance = 0;   /* старт без approve: гейт должен сработать */
+    m->logs_mode = 0;
+    m->service_429 = 0;
+    {
+        /* topic0 событий Safe — по-настоящему, keccak подписей */
+        uint8_t t[32];
+        tb_keccak256("ExecutionSuccess(bytes32,uint256)",
+                     sizeof("ExecutionSuccess(bytes32,uint256)") - 1, t);
+        for (int i = 0; i < 32; i++)
+            sprintf(m->ok_topic0 + 2 + i * 2, "%02x", t[i]);
+        tb_keccak256("ExecutionFailure(bytes32,uint256)",
+                     sizeof("ExecutionFailure(bytes32,uint256)") - 1, t);
+        for (int i = 0; i < 32; i++)
+            sprintf(m->fail_topic0 + 2 + i * 2, "%02x", t[i]);
+        m->ok_topic0[0] = m->fail_topic0[0] = '0';
+        m->ok_topic0[1] = m->fail_topic0[1] = 'x';
+    }
     m->fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;
@@ -176,6 +238,16 @@ static void catch_proposal(const tb_safe_proposal_t *p, void *user)
     (void)user;
     if (g_prop_n < 8)
         g_props[g_prop_n++] = *p;
+}
+
+/* улов атрибуций исполнения (H1.5) */
+static tb_exec_dex_execution_t g_execs[4];
+static int g_exec_n;
+static void catch_execution(const tb_exec_dex_execution_t *e, void *user)
+{
+    (void)user;
+    if (g_exec_n < 4)
+        g_execs[g_exec_n++] = *e;
 }
 
 int main(void)
@@ -279,6 +351,16 @@ int main(void)
         int posts = mock.service_posts;
         CHECK(tb_safe_service_propose(http, &cfg, &p, &err) == 0);
         CHECK(mock.service_posts == posts + 1); /* POST /api/v1 был */
+
+        /* H1.6: тарифный лимит — 429 читаем однозначно, Retry-After
+         * доходит до ошибки; клиент НЕ ограничивает сам */
+        mock.service_429 = 1;
+        tb_error_t r4 = TB_ERROR_INIT;
+        CHECK(tb_safe_service_propose(http, &cfg, &p, &r4) == -1);
+        CHECK(strstr(r4.message, "лимит запросов") != NULL);
+        CHECK(r4.retryable == true);
+        CHECK(r4.retry_after_ms == 2000); /* Retry-After: 2 сек */
+        mock.service_429 = 0;
     }
 
     /* ---- 6. Полный live-цикл: гейт -> approve -> подпись -> trade ---
@@ -302,6 +384,7 @@ int main(void)
         cfg.safe.chain_id = 1;
         cfg.approve_cap_wei = 10000000000000000ull;
         cfg.on_propose = catch_proposal;
+        cfg.on_execution = catch_execution;
 
         tb_exec_backend_t b;
         CHECK(tb_exec_dex_init(&b, http, &cfg, &err) == 0);
@@ -359,11 +442,44 @@ int main(void)
         CHECK(b.poll(&b, tx1, tb_now_ms(), &got, &oerr) == -1);
         CHECK(strstr(oerr.message, "заменено") != NULL);
 
-        /* 6f. «исполнение»: nonce вырос, баланс сместился */
+        /* 6f. «исполнение»: nonce вырос, баланс сместился; атрибуция
+         *     H1.5 срабатывает ВНУТРИ poll — мок уже должен отвечать
+         *     событием Success нашего хеша (эхо topic1) */
         mock.safe_nonce = 7;
         mock.balance = 1500;
+        mock.logs_mode = 1;
         CHECK(b.poll(&b, tx2, tb_now_ms(), &got, &perr) == 0);
         CHECK(got.w[0] == 500); /* дельта 1500-1000 */
+        CHECK(g_exec_n == 1);
+        CHECK(g_execs[0].found == true);
+        CHECK(g_execs[0].success == true);
+        CHECK(g_execs[0].block == 9);
+        CHECK(g_execs[0].balance_delta.w[0] == 500);
+
+        /* 6h. отказ исполнения: событие Failure нашего хеша */
+        g_exec_n = 0;
+        rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
+        CHECK(rc == 1);
+        mock.safe_nonce = 9;
+        mock.balance = 1400; /* дельта 1400-1500 < 0 -> 0 */
+        mock.logs_mode = 2;
+        tb_error_t ferr2 = TB_ERROR_INIT;
+        CHECK(b.poll(&b, tx, tb_now_ms(), &got, &ferr2) == 0);
+        CHECK(g_exec_n == 1);
+        CHECK(g_execs[0].found == true);
+        CHECK(g_execs[0].success == false); /* safe.rejected путь */
+
+        /* 6i. nonce вырос, но события НАШЕГО хеша нет: исполнилось
+         *     другое предложение Safe — атрибуция не доказана */
+        g_exec_n = 0;
+        rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
+        CHECK(rc == 1);
+        mock.safe_nonce = 11;
+        mock.logs_mode = 0; /* пустой ответ логов */
+        tb_error_t ferr3 = TB_ERROR_INIT;
+        CHECK(b.poll(&b, tx, tb_now_ms(), &got, &ferr3) == 0);
+        CHECK(g_exec_n == 1);
+        CHECK(g_execs[0].found == false); /* safe.unattributed путь */
 
         /* 6g. истечение окна: отказ без цепи */
         g_prop_n = 0;
