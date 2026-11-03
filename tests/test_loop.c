@@ -96,9 +96,12 @@ static void test_task_table_remove_shift(void)
             CHECK(tb_task_table_add(&tbl, tasks[i]));
         }
 
-        /* Убираем каждый третий — дыры среди занятых слотов. */
+        /* Убираем каждый третий — дыры среди занятых слотов. remove не
+         * владеет задачей: освободить обязан убравший (иначе leak —
+         * ASan ловил 960 утёкших tb_task_new). */
         for (int i = 0; i < N; i += 3) {
             tb_task_table_remove(&tbl, tasks[i]);
+            tb_task_free(tasks[i]);
             tasks[i] = NULL;
         }
         for (int i = 0; i < N; i++) {
@@ -111,6 +114,7 @@ static void test_task_table_remove_shift(void)
         for (int i = 0; i < N; i += 2) {
             if (tasks[i]) {
                 tb_task_table_remove(&tbl, tasks[i]);
+                tb_task_free(tasks[i]);
                 tasks[i] = NULL;
             }
         }
@@ -122,7 +126,10 @@ static void test_task_table_remove_shift(void)
 
         /* Полная очистка раунда. */
         for (int i = 0; i < N; i++)
-            if (tasks[i]) tb_task_table_remove(&tbl, tasks[i]);
+            if (tasks[i]) {
+                tb_task_table_remove(&tbl, tasks[i]);
+                tb_task_free(tasks[i]);
+            }
         CHECK(tb_task_table_count(&tbl) == 0);
     }
     tb_task_table_destroy(&tbl);
