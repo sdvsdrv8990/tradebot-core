@@ -176,6 +176,13 @@ add_executable(arb_demo src/demo/arb_demo.c)
 target_link_libraries(arb_demo PRIVATE tb_user tb_runtime tb_dex tb_net tb_core)
 
 # ---------------------------------------------------------------------------
+#  Менеджер конфигурации рынка: биржи/активы/пулы/лого — ячейки и
+#  снапшоты, без правок C-кода (market …)
+# ---------------------------------------------------------------------------
+add_executable(market src/tools/market.cpp)
+target_link_libraries(market PRIVATE tb_user tb_runtime tb_dex tb_net tb_core)
+
+# ---------------------------------------------------------------------------
 #  Тесты (CTest)
 # ---------------------------------------------------------------------------
 enable_testing()
@@ -232,3 +239,10 @@ add_executable(test_exec tests/test_exec.cpp)
 target_link_libraries(test_exec PRIVATE tb_runtime)
 add_test(NAME test_exec COMMAND test_exec)
 set_tests_properties(test_exec PROPERTIES TIMEOUT 30)
+
+# market CLI: офлайн-команды на временных конфигах (без сети)
+add_executable(test_mkt_cli tests/test_mkt_cli.cpp src/tools/market.cpp)
+target_compile_definitions(test_mkt_cli PRIVATE MARKET_NO_MAIN)
+target_link_libraries(test_mkt_cli PRIVATE tb_user tb_runtime tb_dex tb_net tb_core)
+add_test(NAME test_mkt_cli COMMAND test_mkt_cli)
+set_tests_properties(test_mkt_cli PROPERTIES TIMEOUT 30)

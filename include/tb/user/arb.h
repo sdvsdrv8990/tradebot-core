@@ -58,6 +58,25 @@ typedef struct tb_arb_web_cfg {
     uint32_t pages_n;     /* 0 -> все стандартные */
 } tb_arb_web_cfg_t;
 
+#define TB_ARB_ASSETS_MAX 48
+#define TB_ARB_NOTE_MAX   64
+
+/* Лист активов (ячеистый реестр): каждый атрибут — адресуемая ячейка,
+ * управляется командами `market asset …` (не правками C-кода). Бот
+ * использует реестр как офлайн-источник symbol/decimals (цепь остаётся
+ * истиной: несходство — предупреждение); logo — файл в logos/token/
+ * (ключ — адрес токена в нижнем регистре), морда раздаёт его сама. */
+typedef struct tb_arb_asset {
+    char      symbol[16];   /* USDC */
+    tb_addr_t addr;         /* адрес токена (ключ + имя файла лого) */
+    uint64_t  chain;        /* цепь токена; 0 -> network.chain_id */
+    uint32_t  decimals;     /* 0 = неизвестно (возьмём с цепи) */
+    bool      decimals_known;
+    bool      enabled;      /* выключенный актив не участвует в discover */
+    char      logo[48];     /* имя файла в logos/token/ ("" — нет) */
+    char      note[TB_ARB_NOTE_MAX];
+} tb_arb_asset_t;
+
 typedef struct tb_arb_pool {
     tb_addr_t token;  /* второй токен пары (первый — хаб) */
     tb_addr_t pool;   /* адрес пула V3 */
@@ -103,6 +122,8 @@ typedef struct tb_arb_cfg {
 
     tb_arb_pool_t pools[TB_ARB_MAX_POOLS];
     uint32_t      pools_n;
+    tb_arb_asset_t assets[TB_ARB_ASSETS_MAX]; /* лист активов (market) */
+    uint32_t        assets_n;
 
     tb_arb_web_cfg_t web; /* раздел "web" конфига */
 } tb_arb_cfg_t;

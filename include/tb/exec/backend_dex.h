@@ -136,6 +136,14 @@ int tb_exec_dex_block_number(tb_http_t *http, const tb_exec_dex_venue_t *v,
 int tb_exec_dex_gas_price(tb_http_t *http, const tb_exec_dex_venue_t *v,
                           uint64_t *price_wei, tb_error_t *err);
 
+/* Поиск пула на фабрике биржи: V3 — getPool(tokenA, tokenB, fee),
+ * V2 — getPair(tokenA, tokenB). *found=false — фабрика не знает пары
+ * (не ошибка). 0 — успех запроса. (market pool discover/inspect.) */
+int tb_exec_dex_find_pool(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                          const tb_addr_t *token_a, const tb_addr_t *token_b,
+                          uint32_t fee, bool *found, tb_addr_t *pool,
+                          tb_error_t *err);
+
 /* Проверка пула на цепи: V3 — Factory.getPool(tokenA, tokenB, fee),
  * V2 — Factory.getPair(tokenA, tokenB); адрес с цепи обязан совпасть с
  * expect_pool (конфиг — ожидание, цепь — истина).

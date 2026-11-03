@@ -1230,6 +1230,20 @@ tb_arb_t *tb_arb_create(const tb_arb_cfg_t *cfg, tb_exec_engine_t *engine,
         return NULL;
     }
 
+    /* В5+: сначала лист активов конфига (market asset …) — офлайн-сид
+     * symbol/decimals, eth_call только для неизвестных токенов */
+    for (uint32_t k = 0; k < a->cfg.assets_n && a->toks_n < TB_ARB_MAX_POOLS;
+         k++) {
+        const tb_arb_asset_t *as = &a->cfg.assets[k];
+        if (!as->symbol[0])
+            continue;
+        struct tok_info *ti = &a->toks[a->toks_n++];
+        memset(ti, 0, sizeof(*ti));
+        ti->addr = as->addr;
+        snprintf(ti->symbol, sizeof(ti->symbol), "%s", as->symbol);
+        ti->decimals = (uint8_t)(as->decimals_known ? as->decimals : 0);
+    }
+
     /* В5: symbol/decimals токенов с цепи, ПАРАЛЛЕЛЬНО (временный пул;
      * последовательные 26 eth_call ели ~10 с старта). Ошибка — не
      * фатальна: пустой символ = короткий адрес на странице. */
@@ -1242,6 +1256,8 @@ tb_arb_t *tb_arb_create(const tb_arb_cfg_t *cfg, tb_exec_engine_t *engine,
             for (uint32_t i = 0; i < a->cfg.pools_n; i++) {
                 const tb_addr_t *t = &a->cfg.pools[i].token;
                 if (tb_addr_eq(t, &a->cfg.weth))
+                    continue;
+                if (tok_find(a, t))
                     continue;
                 bool dup = false;
                 for (size_t k = 0; k < unique && !dup; k++)

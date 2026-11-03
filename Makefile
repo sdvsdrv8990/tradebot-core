@@ -127,7 +127,7 @@ TEST_BINS    := $(TEST_C_BINS) $(TEST_CXX_BINS)
                   # строки «make» собирал ТОЛЬКО его (баг запасного пути)
 
 all: $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a $(BUILD)/bot_demo \
-     $(BUILD)/events_demo $(BUILD)/exec_demo $(BUILD)/arb_demo
+     $(BUILD)/events_demo $(BUILD)/exec_demo $(BUILD)/arb_demo $(BUILD)/market
 
 debug:
 	$(MAKE) OPT="-O0 -g -DTB_DEBUG" all
@@ -205,6 +205,16 @@ $(BUILD)/arb_demo: $(ARBDEMO_OBJ) $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(B
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -Ithird_party/mbedtls/include -Ithird_party/secp256k1/include -o $@ $(ARBDEMO_OBJ) \
         $(BUILD)/libtb_sign.a $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a \
+        $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a $(LDFLAGS_NET) \
+        $(BUILD)/libsecp256k1.a $(LDFLAGS)
+
+# market — менеджер конфигурации (ячейки/снапшоты; см. src/tools)
+$(BUILD)/market: src/tools/market.cpp $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a \
+        $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a \
+        $(BUILD)/libmbed_tls.a $(BUILD)/libsecp256k1.a
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Ithird_party/mbedtls/include -Ithird_party/secp256k1/include -o $@ $< \
+        $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a \
         $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a $(LDFLAGS_NET) \
         $(BUILD)/libsecp256k1.a $(LDFLAGS)
 
