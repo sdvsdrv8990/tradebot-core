@@ -1,6 +1,7 @@
-# CI: Linux, gcc + clang — проект POSIX-only (epoll/eventfd/сокеты),
-# Windows не целевая платформа. Стартер-шаблон GitHub заменён: без
-# виндовой джобы, с выводом упавших тестов.
+# CI: Linux, gcc + clang (+ gcc/UBSan) — проект POSIX-only
+# (epoll/eventfd/сокеты), Windows не целевая платформа.
+# UBSan-нога не временная: UB уже дважды взрывался на стыке версий
+# компиляторов (rotl64 x>>64; текущий кейс test_pub_freshness).
 name: CI (Linux)
 
 on:
@@ -16,10 +17,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - c: gcc
+          - name: gcc
+            c: gcc
             cxx: g++
-          - c: clang
+            flags: ""
+          - name: clang
+            c: clang
             cxx: clang++
+            flags: ""
+          - name: gcc-ubsan
+            c: gcc
+            cxx: g++
+            flags: "-fsanitize=undefined -fno-sanitize-recover=all -g"
 
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +38,8 @@ jobs:
           cmake -B build -S .
           -DCMAKE_C_COMPILER=${{ matrix.c }}
           -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_C_FLAGS="${{ matrix.flags }}"
+          -DCMAKE_CXX_FLAGS="${{ matrix.flags }}"
           -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
