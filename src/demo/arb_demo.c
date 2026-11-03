@@ -489,6 +489,26 @@ static void emit_safe_proposal(app_t *d, const tb_safe_proposal_t *p,
             printf("  в очереди Safe UI: https://app.safe.global/"
                    "eth:%s/transactions/queue\n",
                    safe_h);
+            /* вторичный статус: журнал фиксирует доставку в очередь;
+             * первичный статус исполнения — всегда nonce/bаланс
+             * с цепи (индексер может отставать) */
+            if (d->ledger) {
+                char stx_h[67];
+                stx_h[0] = '0';
+                stx_h[1] = 'x';
+                for (int i = 0; i < 32; i++)
+                    sprintf(stx_h + 2 + i * 2, "%02x",
+                            p->safe_tx_hash[i]);
+                char qpay[320];
+                snprintf(qpay, sizeof(qpay),
+                         "{\"kind\":\"%s\",\"nonce\":%llu,"
+                         "\"safe_tx_hash\":\"%s\"}",
+                         p->kind, (unsigned long long)p->safe_nonce,
+                         stx_h);
+                tb_error_t qerr = TB_ERROR_INIT;
+                tb_ledger_emit(d->ledger, "safe.queued", qpay, NULL,
+                               NULL, &qerr);
+            }
         } else {
             fprintf(stderr, "  сервис очереди недоступен: %s "
                             "(артефакт-файл действителен)\n",
