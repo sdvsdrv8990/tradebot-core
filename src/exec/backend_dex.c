@@ -855,14 +855,15 @@ int tb_exec_dex_gas_price(tb_http_t *http, const tb_exec_dex_venue_t *v,
     return 0;
 }
 
-int tb_exec_dex_verify_pool(tb_http_t *http, const tb_exec_dex_venue_t *v,
-                            const tb_addr_t *token_a, const tb_addr_t *token_b,
-                            uint32_t fee, const tb_addr_t *expect_pool,
-                            tb_error_t *err)
+int tb_exec_dex_find_pool(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                          const tb_addr_t *token_a, const tb_addr_t *token_b,
+                          uint32_t fee, bool *found, tb_addr_t *pool,
+                          tb_error_t *err)
 {
-    if (tb_addr_is_native(&v->factory))
-        return 0; /* фабрика не задана: проверять нечем (с предупреждением
-                     на совести вызывающего) */
+    if (tb_addr_is_native(&v->factory)) {
+        TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                      "find: у биржи %s нет factory", v->name);
+    }
 
     const bool is_v2 = v->kind == TB_DEX_V2;
     uint8_t sel[4];
@@ -896,18 +897,13 @@ int tb_exec_dex_verify_pool(tb_http_t *http, const tb_exec_dex_venue_t *v,
         return -1;
     }
 
-    /* ответ — слово; адрес = последние 20 байт (40 hex-символов) */
-    tb_addr_t on_chain;
-    size_t len = strlen(result);
-    char expect_hex[43], got_hex[43];
-    tb_addr_to_hex(expect_pool, expect_hex, sizeof(expect_hex));
+    /* ответ — слово; адрес = последние 20 байт (40 hex-символов);
+     * "0x" — фабрика не знает такой пары/fee */
     const char *fn = is_v2 ? "getPair" : "getPool";
-    if (len <= 2) { /* "0x" — фабрика не знает такой пары/fee */
-        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
-                     "%s %s: пула %s нет (фабрика вернула 0x0; "
-                     "пара/fee в конфиге не совпадают с цепью)",
-                     fn, v->name, expect_hex);
-        return -1;
+    size_t len = strlen(result);
+    if (len <= 2) {
+        *found = false;
+        return 0;
     }
     if (len < 42 || (len - 2) % 2 != 0) {
         TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
@@ -916,15 +912,45 @@ int tb_exec_dex_verify_pool(tb_http_t *http, const tb_exec_dex_venue_t *v,
     }
     char addr_hex[43] = "0x";
     memcpy(addr_hex + 2, result + len - 40, 40);
-    if (tb_addr_from_hex(&on_chain, addr_hex, err) != 0) {
+    if (tb_addr_from_hex(pool, addr_hex, err) != 0) {
         TB_ERROR_WRAP(err, "%s %s", fn, v->name);
         return -1;
     }
+    *found = true;
+    return 0;
+}
+
+int tb_exec_dex_verify_pool(tb_http_t *http, const tb_exec_dex_venue_t *v,
+                            const tb_addr_t *token_a, const tb_addr_t *token_b,
+                            uint32_t fee, const tb_addr_t *expect_pool,
+                            tb_error_t *err)
+{
+    if (tb_addr_is_native(&v->factory))
+        return 0; /* фабрика не задана: проверять нечем (с предупреждением
+                     на совести вызывающего) */
+
+    bool found = false;
+    tb_addr_t on_chain;
+    if (tb_exec_dex_find_pool(http, v, token_a, token_b, fee, &found,
+                              &on_chain, err) != 0)
+        return -1;
+
+    char expect_hex[43], got_hex[43];
+    tb_addr_to_hex(expect_pool, expect_hex, sizeof(expect_hex));
     tb_addr_to_hex(&on_chain, got_hex, sizeof(got_hex));
+    const bool is_v2 = v->kind == TB_DEX_V2;
+    if (!found) {
+        TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                     "%s %s: пула %s нет (фабрика вернула 0x0; "
+                     "пара/fee в конфиге не совпадают с цепью)",
+                     is_v2 ? "getPair" : "getPool", v->name, expect_hex);
+        return -1;
+    }
     if (!tb_addr_eq(&on_chain, expect_pool)) {
         TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                      "%s %s: конфиг 0x%s, фабрика 0x%s",
-                     fn, v->name, expect_hex + 2, got_hex + 2);
+                     is_v2 ? "getPair" : "getPool", v->name, expect_hex + 2,
+                     got_hex + 2);
         return -1;
     }
     return 0;

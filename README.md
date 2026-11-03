@@ -144,6 +144,45 @@ uniswap-v3-base и pancakeswap-v3-base, 7 пулов USDC/USDbC/DAI —
 keep-alive делает TLS-рукопожатие на каждый запрос, батч 23 пулов —
 это ~70 RPC.
 
+### Менеджер конфигурации `market` (пулы/биржи/активы — без правок кода)
+
+Добавить биржу, актив, логотип или включить пул — команды CLI, а не
+редактирование C-кода и не правка JSON руками. Конфигурация — «листы с
+ячейками»: каждое поле (`url`, `quoter`, `fee`, `logo`, `note`, …) —
+отдельная адресуемая ячейка; команды меняют ровно свою ячейку
+(логотип и символ актива — разные ячейки, хоть и рядом). Перед каждой
+мутацией автоматически снимается снапшот в `config-history/` — любая
+правка обратима.
+
+```bash
+# биржи (лист rpc)
+./market dex add pancakeswap-v3 --url https://… --quoter 0x… --factory 0x…
+./market dex update uniswap-v3 --url https://новый-rpc      # ячейка url
+./market dex logo set uniswap-v3 --file logo.png            # logos/dex/
+
+# активы (лист assets: символ/адрес/decimals/лого — отдельные ячейки)
+./market asset add USDC --address 0x… --chain 1 --decimals 6
+./market asset logo set USDC --file usdc.svg   # logos/token/<адрес>.svg
+
+# пулы
+./market pool discover [--dex uniswap-v3] [--symbol USDC] [--add]
+./market pool inspect 0x88e6…                  # конфиг + фабрика на цепи
+./market pool disable 0x88e6…                  # остаётся в конфиге,
+./market pool enable 0x88e6…                   # бот не смотрит/смотрит
+
+# целостность и история
+./market config validate [--verify]            # + сверка фабрик на цепи
+./market config diff                           # текущий vs снапшот (ячейки)
+./market config rollback                       # отменить последнюю мутацию
+./market config rollback --step 5 --list       # глубже; список снапшотов
+```
+
+`--config PATH` (или env `MARKET_CONFIG`) — путь к конфигу, по умолчанию
+`arb_config.json`. `discover` обходит фабрики всех бирж по всем тир-комиссиям
+для активов из листа (и токенов watchlist), `--add` складывает найденное
+выключенным (`enabled:false`) — включение всегда осознанное. Лист активов
+также экономит стартовые RPC: symbol/decimals берутся из него офлайн.
+
 ### Математика решения (без ручных порогов прибыльности)
 
 Решение по паре пулов считается из рыночных данных, а не из настроек:

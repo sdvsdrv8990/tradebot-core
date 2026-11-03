@@ -175,10 +175,23 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
         }
     }
 
-    /* pools: [{token, pool, fee, dex}] */
+    /* pools: [{token, pool, fee, dex, enabled?}] — ячейка enabled
+     * управляется `market pool enable/disable`; выключенные пулы
+     * остаются в конфиге, но в watchlist бота не попадают */
+    unsigned pools_skipped = 0;
     auto pools = doc.FindMember("pools");
     if (pools != doc.MemberEnd() && pools->value.IsArray()) {
         for (const auto &v : pools->value.GetArray()) {
+            bool enabled = true;
+            {
+                auto e = v.FindMember("enabled");
+                if (e != v.MemberEnd() && e->value.IsBool())
+                    enabled = e->value.GetBool();
+            }
+            if (!enabled) {
+                pools_skipped++;
+                continue;
+            }
             if (out->pools_n >= TB_ARB_MAX_POOLS)
                 TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
                               "config: много пулов (макс %d)",
@@ -195,6 +208,62 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
                 TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
                               "config: pools[%u].dex", out->pools_n);
             out->pools_n++;
+        }
+    }
+    if (pools_skipped)
+        fprintf(stderr,
+                "config: выключено пулов (enabled:false): %u — в watchlist "
+                "не попадают\n",
+                pools_skipped);
+
+    /* assets: [{symbol, address, chain?, decimals?, logo?, enabled?,
+     * note?}] — лист активов; управляется `market asset …` */
+    auto assets = doc.FindMember("assets");
+    if (assets != doc.MemberEnd() && assets->value.IsArray()) {
+        for (const auto &v : assets->value.GetArray()) {
+            if (out->assets_n >= TB_ARB_ASSETS_MAX)
+                TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                              "config: много активов (макс %d)",
+                              TB_ARB_ASSETS_MAX);
+            tb_arb_asset_t &a = out->assets[out->assets_n];
+            if (!str_field(v, "symbol", a.symbol, sizeof(a.symbol))
+                || a.symbol[0] == '\0')
+                TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                              "config: assets[%u].symbol", out->assets_n);
+            if (!addr_field(v, "address", &a.addr, err)
+                || tb_addr_is_native(&a.addr))
+                TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                              "config: assets[%u].address", out->assets_n);
+            {
+                uint64_t ch = 0;
+                if (!u64_field(v, "chain", &ch))
+                    TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                                  "config: assets[%u].chain", out->assets_n);
+                a.chain = ch;
+            }
+            {
+                uint64_t dec = 0;
+                if (!u64_field(v, "decimals", &dec))
+                    TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                                  "config: assets[%u].decimals",
+                                  out->assets_n);
+                if (dec) {
+                    a.decimals = (uint32_t)dec;
+                    a.decimals_known = dec <= 255;
+                }
+            }
+            {
+                auto e = v.FindMember("enabled");
+                a.enabled = !(e != v.MemberEnd() && e->value.IsBool()
+                              && !e->value.GetBool());
+            }
+            if (!str_field(v, "logo", a.logo, sizeof(a.logo)))
+                TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                              "config: assets[%u].logo", out->assets_n);
+            if (!str_field(v, "note", a.note, sizeof(a.note)))
+                TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                              "config: assets[%u].note", out->assets_n);
+            out->assets_n++;
         }
     }
 

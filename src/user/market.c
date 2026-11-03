@@ -156,8 +156,10 @@ int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
              * блока и хаб чужой цепи не существуют) */
             if (snaps[i].chain != snaps[j].chain)
                 continue;
-            /* В6: разные блоки — не сравниваем (0 = неизвестен) */
-            if (snaps[i].block != snaps[j].block)
+            /* В6: разные блоки — не сравниваем; 0 = блок неизвестен
+             * (latest каждого — разные состояния цепи) — тоже не
+             * сравниваем, вопреки прежнему молчаливому пропуску */
+            if (snaps[i].block == 0 || snaps[i].block != snaps[j].block)
                 continue;
             uint32_t r = 0;
             if (!tb_arb_ratio_bp(&snaps[i].buy_out, &snaps[j].buy_out, &r)
@@ -187,10 +189,12 @@ int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
         MK_APPEND("%s{\"token\":\"%s\",\"symbol\":\"%s\","
                   "\"buy\":\"%s %u.%04u%%\","
                   "\"sell\":\"%s %u.%04u%%\",\"spread_bp\":%u,"
-                  "\"profit_est\":\"%s\"}",
+                  "\"same_dex\":%s,\"profit_est\":\"%s\"}",
                   k ? "," : "", tok_s, bs->symbol[0] ? bs->symbol : "",
                   bs->dex, bs->fee / 10000, bs->fee % 10000, ss->dex,
-                  ss->fee / 10000, ss->fee % 10000, pairs[k].bp, prof_s);
+                  ss->fee / 10000, ss->fee % 10000, pairs[k].bp,
+                  strcmp(bs->dex, ss->dex) == 0 ? "true" : "false",
+                  prof_s);
     }
 
     /* В7: реальная котировка лучшей пары рядом с оценкой */
