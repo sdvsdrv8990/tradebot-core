@@ -652,6 +652,39 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
             TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW,
                           "dex: exactInput calldata");
 
+        /* Целостность маршрута: обе ноги обязаны резолвиться фабрикой
+         * роутера исполнения — иначе расчёт и исполнение разъедутся
+         * (path не несёт адресов пулов; ревью L1) */
+        {
+            tb_addr_t rf = c->cfg.router_factory;
+            if (tb_addr_is_native(&rf)) {
+                /* дефолт: SwapRouter02 -> фабрика Uniswap V3 mainnet */
+                tb_error_t fe = TB_ERROR_INIT;
+                if (tb_addr_from_hex(&rf,
+                                     "0x1F98431c8aD98523631AE4a59f267"
+                                     "346ea31F984",
+                                     &fe)
+                    != 0)
+                    rf = c->cfg.safe.router; /* fallback: гейт пройдёт
+                                              * только same-factory */
+            }
+            for (size_t h = 0; h < tb_route_hops(route); h++) {
+                tb_addr_t pool = tb_route_pool(route, h);
+                const tb_exec_dex_venue_t *v = venue_by_pool(c, &pool);
+                if (!v)
+                    TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                                  "маршрут: пул хопа %zu вне бирж", h);
+                if (tb_addr_is_native(&v->factory)
+                    || !tb_addr_eq(&v->factory, &rf))
+                    TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                                  "маршрут: хоп %zu (%s) лежит на чужой "
+                                  "фабрике — роутер исполнения свернёт "
+                                  "его в другой пул; предложение не "
+                                  "строится (кросс-DEX = R2/Multicall3)",
+                                  h, v->name);
+            }
+        }
+
         tb_safe_proposal_t prop;
         if (tb_safe_propose_exec(c->http, &c->cfg.safe, &c->cfg.safe.router,
                                  0, calldata, calldata_len, now_ms, &prop,
@@ -675,7 +708,20 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
         s->safe_nonce = prop.safe_nonce;
         s->expires_ms = prop.expires_at_ms;
         memcpy(s->safe_tx_hash, prop.safe_tx_hash, 32);
-        s->born_block = 0; /* заполнит первый poll (нужно после роста) */
+        { /* блок рождения предложения: getLogs пойдёт ОТ него, а не от
+           * «текущий-4096» (ревью L1); ошибка -> 0 = fallback окно */
+            tb_exec_dex_venue_t v0 = { 0 };
+            snprintf(v0.name, sizeof(v0.name), "safe-rpc");
+            snprintf(v0.rpc_url, sizeof(v0.rpc_url), "%s",
+                     c->cfg.safe.rpc_url);
+            if (c->cfg.safe.rpc_host_pinned[0])
+                snprintf(v0.rpc_host_pinned,
+                         sizeof(v0.rpc_host_pinned), "%s",
+                         c->cfg.safe.rpc_host_pinned);
+            tb_error_t be = TB_ERROR_INIT;
+            (void)tb_exec_dex_block_number(c->http, &v0, &s->born_block,
+                                           &be);
+        }
         s->out_token = out_tok;
         s->balance_before = before;
         s->amount_out = out; /* оценка; истина придёт дельтой в poll */
@@ -765,38 +811,48 @@ static int dex_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
         if (!tb_u256_sub(amount_out, &after, &s->balance_before))
             memset(amount_out, 0, sizeof(*amount_out)); /* стало меньше */
 
-        /* атрибуция (H1.5): событие ExecutionSuccess/Failure нашего
-         * safeTxHash доказывает, что исполнилось ИМЕННО наше
-         * предложение; рост nonce сам по себе — только сигнал */
-        if (c->cfg.on_execution) {
-            uint64_t cur_block = 0;
-            {
-                /* хеш-грубость: getLogs от текущего блока назад на
-                 * окно наблюдения (30 мин майнинта ~ 600 блоков; 4096
-                 * с запасом на медленные цепи) */
+        /* атрибуция (H1.5, правка ревью): событие ExecutionSuccess/
+         * Failure нашего safeTxHash доказывает исполнение ИМЕННО
+         * нашего предложения. Три состояния не смешиваются:
+         * FOUND / ABSENT (запрос успешен, события нет) / ERROR (RPC
+         * не ответил). Колбэк вызывается ВСЕГДА — иначе журнал теряет
+         * даже факт неудавшейся проверки */
+        {
+            tb_exec_dex_execution_t ex = { 0 };
+            ex.balance_delta = *amount_out;
+            memcpy(ex.safe_tx_hash, s->safe_tx_hash, 32);
+            tb_error_t serr2 = TB_ERROR_INIT;
+            bool found = false, success = false;
+            uint64_t blk2 = 0;
+            /* getLogs от блока рождения предложения (ревью L1),
+             * fallback — окно 4096 от текущего, если блок не взяли */
+            uint64_t from = s->born_block;
+            if (!from) {
                 tb_exec_dex_venue_t v = { 0 };
                 snprintf(v.name, sizeof(v.name), "safe-rpc");
                 snprintf(v.rpc_url, sizeof(v.rpc_url), "%s",
                          c->cfg.safe.rpc_url);
                 if (c->cfg.safe.rpc_host_pinned[0])
-                    snprintf(v.rpc_host_pinned, sizeof(v.rpc_host_pinned),
-                             "%s", c->cfg.safe.rpc_host_pinned);
+                    snprintf(v.rpc_host_pinned,
+                             sizeof(v.rpc_host_pinned), "%s",
+                             c->cfg.safe.rpc_host_pinned);
                 tb_error_t blkh = TB_ERROR_INIT;
-                (void)tb_exec_dex_block_number(c->http, &v, &cur_block,
-                                               &blkh);
+                uint64_t cur = 0;
+                (void)tb_exec_dex_block_number(c->http, &v, &cur, &blkh);
+                from = cur > 4096 ? cur - 4096 : 0;
             }
-            tb_exec_dex_execution_t ex = { 0 };
-            ex.balance_delta = *amount_out;
-            memcpy(ex.safe_tx_hash, s->safe_tx_hash, 32);
-            tb_error_t serr2 = TB_ERROR_INIT;
-            uint64_t from = cur_block > 4096 ? cur_block - 4096 : 0;
             if (tb_safe_execution_status(c->http, &c->cfg.safe,
-                                         s->safe_tx_hash, from, &ex.found,
-                                         &ex.success, &ex.block,
-                                         &serr2) == 0)
+                                         s->safe_tx_hash, from, &found,
+                                         &success, &blk2, &serr2) == 0) {
+                ex.status = found ? TB_ATTRIB_FOUND : TB_ATTRIB_ABSENT;
+                ex.success = success;
+                ex.block = blk2;
+            } else {
+                ex.status = TB_ATTRIB_ERROR; /* не «нет события», а
+                                              * «не смогли проверить» */
+            }
+            if (c->cfg.on_execution)
                 c->cfg.on_execution(&ex, c->cfg.execution_user);
-            /* ошибка getLogs не ломает расчёт: дельта уже есть, но
-             * журнал получит found=false (атрибуция не доказана) */
         }
 
         s->tx_id = 0;

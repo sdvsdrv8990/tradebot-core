@@ -933,12 +933,17 @@ static void try_combine(arb_batch_t *b)
         tb_u256_to_dec(&stake, sz, sizeof(sz));
         tb_u256_to_dec(&e->r.min_out, mo, sizeof(mo));
         tb_u256_to_dec(&e->r.opt_profit, op, sizeof(op));
-        char pay[640];
+        /* неполный поиск (ревью L1): прибыль реальна (котировки
+         * настоящие, min_out защищает), но оптимальность объёма не
+         * доказана — маркируем PRELIMINARY, не блокируем */
+        char pay[704];
         snprintf(pay, sizeof(pay),
                  "{\"event_id\":%llu,\"size\":\"%s\",\"min_out\":\"%s\","
-                 "\"opt_profit_wei\":\"%s\",\"gas_cost_wei\":%llu}",
+                 "\"opt_profit_wei\":\"%s\",\"gas_cost_wei\":%llu,"
+                 "\"preliminary\":%s}",
                  (unsigned long long)ev, sz, mo, op,
-                 (unsigned long long)e->r.gas_cost_wei);
+                 (unsigned long long)e->r.gas_cost_wei,
+                 e->r.incomplete ? "true" : "false");
         tb_error_t lerr = TB_ERROR_INIT;
         tb_ledger_emit(a->ledger, "decision.submitted", pay, NULL, NULL,
                        &lerr);

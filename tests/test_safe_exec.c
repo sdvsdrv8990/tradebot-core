@@ -114,6 +114,12 @@ static void serve(mock_t *m, int c)
                 m->want_hash[66] = '\0';
             }
         }
+        if (m->logs_mode == 3) {
+            n = snprintf(out, sizeof(out),
+                         "{\"id\":1,\"error\":{\"code\":-32603,"
+                         "\"message\":\"rpc: logs unavailable\"}}");
+            goto serve_out;
+        }
         snprintf(m->want_topic0, sizeof(m->want_topic0), "%s",
                  m->logs_mode == 2 ? m->fail_topic0 : m->ok_topic0);
         if (m->logs_mode == 0) {
@@ -157,14 +163,17 @@ static void serve(mock_t *m, int c)
     }
 
     char hdr[192];
-    int hn = snprintf(hdr, sizeof(hdr),
-                      "HTTP/1.1 200 OK\r\nContent-Type: "
-                      "application/json\r\n%s%sContent-Length: %zu\r\n"
-                      "Connection: close\r\n\r\n",
-                      *hdr_extra ? hdr_extra : "",
-                      *hdr_extra ? "\r\n" : "", strlen(out));
-    send(c, hdr, (size_t)hn, 0);
-    send(c, out, (size_t)n, 0);
+serve_out:
+    {
+        int hn = snprintf(hdr, sizeof(hdr),
+                          "HTTP/1.1 200 OK\r\nContent-Type: "
+                          "application/json\r\n%s%sContent-Length: %zu"
+                          "\r\nConnection: close\r\n\r\n",
+                          *hdr_extra ? hdr_extra : "",
+                          *hdr_extra ? "\r\n" : "", strlen(out));
+        send(c, hdr, (size_t)hn, 0);
+        send(c, out, (size_t)n, 0);
+    }
     close(c);
 }
 
@@ -372,6 +381,9 @@ int main(void)
         snprintf(cfg.venues[0].rpc_url, sizeof(cfg.venues[0].rpc_url),
                  "http://127.0.0.1:%u", (unsigned)mock.port);
         cfg.venues[0].quoter = A("0x61fFE014bA17989E743c5F6cB21bF9697530B21e");
+        cfg.venues[0].factory =
+            A("0x1F98431c8aD98523631AE4a59f267346ea31F984"); /* Uni V3 —
+            та же фабрика, что резолвит роутер исполнения */
         cfg.venues[0].pools[0] = A("0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640");
         cfg.venues[0].pools_n = 1;
         cfg.venues_n = 1;
@@ -451,7 +463,7 @@ int main(void)
         CHECK(b.poll(&b, tx2, tb_now_ms(), &got, &perr) == 0);
         CHECK(got.w[0] == 500); /* дельта 1500-1000 */
         CHECK(g_exec_n == 1);
-        CHECK(g_execs[0].found == true);
+        CHECK(g_execs[0].status == TB_ATTRIB_FOUND);
         CHECK(g_execs[0].success == true);
         CHECK(g_execs[0].block == 9);
         CHECK(g_execs[0].balance_delta.w[0] == 500);
@@ -466,7 +478,7 @@ int main(void)
         tb_error_t ferr2 = TB_ERROR_INIT;
         CHECK(b.poll(&b, tx, tb_now_ms(), &got, &ferr2) == 0);
         CHECK(g_exec_n == 1);
-        CHECK(g_execs[0].found == true);
+        CHECK(g_execs[0].status == TB_ATTRIB_FOUND);
         CHECK(g_execs[0].success == false); /* safe.rejected путь */
 
         /* 6i. nonce вырос, но события НАШЕГО хеша нет: исполнилось
@@ -479,7 +491,9 @@ int main(void)
         tb_error_t ferr3 = TB_ERROR_INIT;
         CHECK(b.poll(&b, tx, tb_now_ms(), &got, &ferr3) == 0);
         CHECK(g_exec_n == 1);
-        CHECK(g_execs[0].found == false); /* safe.unattributed путь */
+        CHECK(g_execs[0].status == TB_ATTRIB_ABSENT); /* unattributed:
+                                                        * исполнилось
+                                                        * другое, НЕ отказ */
 
         /* 6g. истечение окна: отказ без цепи */
         g_prop_n = 0;
@@ -491,6 +505,44 @@ int main(void)
               == -1);
         CHECK(strstr(eerr.message, "истекло") != NULL);
         CHECK(mock.sendraw_count == 0); /* ни одной отправки за всё */
+
+        /* 6j. RPC не ответил на getLogs: проверить не удалось — это
+         * ERROR, не ABSENT; колбэк вызывается всегда (ревью L1:
+         * иначе журнал терял бы даже факт неудавшейся проверки) */
+        g_exec_n = 0;
+        rc = b.submit(&b, &r, &in, &mn, 0, tb_now_ms(), &tx, &got, &serr);
+        CHECK(rc == 1);
+        mock.safe_nonce = 13;
+        mock.logs_mode = 3;
+        tb_error_t ferr4 = TB_ERROR_INIT;
+        CHECK(b.poll(&b, tx, tb_now_ms(), &got, &ferr4) == 0);
+        CHECK(g_exec_n == 1);
+        CHECK(g_execs[0].status == TB_ATTRIB_ERROR);
+
+        /* 6k. ЦЕЛОСТНОСТЬ МАРШРУТА: пул чужой фабрики (Pancake) —
+         * роутер исполнения свернёт path в ДРУГОЙ пул; предложение
+         * обязано не строиться (ревью L1, до Multicall3/R2) */
+        {
+            tb_exec_dex_cfg_t cfg2;
+            memset(&cfg2, 0, sizeof(cfg2));
+            cfg2 = cfg;
+            cfg2.venues[0].factory =
+                A("0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"); /* Pancake */
+            cfg2.venues_n = 1;
+            cfg2.on_propose = catch_proposal;
+            cfg2.on_execution = catch_execution;
+            tb_exec_backend_t b2;
+            CHECK(tb_exec_dex_init(&b2, http, &cfg2, &err) == 0);
+            g_prop_n = 0;
+            tb_error_t xerr = TB_ERROR_INIT;
+            int rc2 = b2.submit(&b2, &r, &in, &mn, 0, tb_now_ms(), &tx,
+                                &got, &xerr);
+            CHECK(rc2 == -1);
+            CHECK(strstr(xerr.message, "чужой фабрике") != NULL);
+            CHECK(g_prop_n == 0); /* предложения нет — и не будет */
+            CHECK(mock.sendraw_count == 0);
+            b2.destroy(&b2);
+        }
 
         b.destroy(&b);
     }

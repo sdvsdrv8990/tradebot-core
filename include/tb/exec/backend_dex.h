@@ -81,9 +81,17 @@ typedef void (*tb_exec_dex_proposal_cb)(const tb_safe_proposal_t *p,
 /* settlement v2 (H1.5): атрибуция исполнения конкретному предложению
  * по событиям Safe (ExecutionSuccess/Failure, topic1 = safeTxHash).
  * Вызывается из потока poll движка при росте nonce. */
+typedef enum tb_exec_dex_attribution {
+    TB_ATTRIB_ERROR = 0,      /* RPC не ответил: проверить не удалось —
+                              * НЕ «не найдено» и НЕ «отказ» */
+    TB_ATTRIB_FOUND = 1,     /* событие нашего safeTxHash есть */
+    TB_ATTRIB_ABSENT = 2,    /* запрос успешен, события нашего хеша нет
+                              * (исполнилось другое предложение Safe) */
+} tb_exec_dex_attribution_t;
+
 typedef struct tb_exec_dex_execution {
-    bool      found;          /* событие нашего предложения найдено */
-    bool      success;        /* ExecutionSuccess (иначе Failure) */
+    tb_exec_dex_attribution_t status;
+    bool      success;        /* при FOUND: ExecutionSuccess/Failure */
     uint64_t  block;
     uint8_t   safe_tx_hash[32];
     tb_u256_t balance_delta;  /* фактическая дельта (сумма расчёта) */
@@ -115,6 +123,13 @@ typedef struct tb_exec_dex_cfg {
                                           * (max_trade x MULT); 0 ->
                                           * approve ровно на ставку */
     tb_safe_cfg_t       safe;
+    /* ЦЕЛОСТНОСТЬ МАРШРУТА (ревью L1): SwapRouter02 резолвит пулы
+     * path СВОЕЙ фабрикой. Нога маршрута исполняется тем же пулом,
+     * по которому считалась, ТОЛЬКО если фабрика venue ноги совпадает
+     * с фабрикой роутера исполнения. Пусто -> фабрика Uniswap V3
+     * mainnet (роутер по умолчанию — SwapRouter02). Несовпадение —
+     * предложение не строится (кросс-DEX ждёт Multicall3, план R2). */
+    tb_addr_t           router_factory;
 } tb_exec_dex_cfg_t;
 
 /* Инициализация заимствованного tb_exec_backend_t (не heap: структура
