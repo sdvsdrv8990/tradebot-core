@@ -332,7 +332,9 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
                           "config: decision числа");
     }
 
-    /* network: {chain_id, safe, router, key_file, live_exec, max_fee_wei} */
+    /* network: {chain_id, safe, router, live_exec, max_fee_wei,
+     *            safe_tx_service_url?} — приватного ключа НЕТ (безключевая
+     *            модель p0.1); поле key_file игнорируем с предупреждением */
     auto net = doc.FindMember("network");
     if (net != doc.MemberEnd() && net->value.IsObject()) {
         const auto &v = net->value;
@@ -353,10 +355,33 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
         if (!addr_field(v, "router", &out->dex.safe.router, err))
             TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
                           "config: network.router не адрес");
-        if (!str_field(v, "key_file", out->key_file,
-                       sizeof(out->key_file)))
-            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
-                          "config: network.key_file");
+        {
+            auto kf = v.FindMember("key_file");
+            if (kf != v.MemberEnd())
+                fprintf(stderr,
+                        "config: network.key_file устарел и игнорируется — "
+                        "безключевая модель (Safe 1-из-1), ключ не нужен\n");
+        }
+        /* очередь Safe UI: дефолт по цепи; "off" = только артефакт-файл */
+        {
+            char svc[TB_HTTP_URL_MAX] = { 0 };
+            str_field(v, "safe_tx_service_url", svc, sizeof(svc));
+            if (svc[0] == '\0') {
+                auto f = v.FindMember("safe_tx_service_url");
+                if (f == v.MemberEnd()) {
+                    if (chain == 8453)
+                        snprintf(svc, sizeof(svc), "%s",
+                                 TB_SAFE_TXSVC_BASE);
+                    else
+                        snprintf(svc, sizeof(svc), "%s",
+                                 TB_SAFE_TXSVC_MAINNET);
+                }
+            } else if (strcmp(svc, "off") == 0) {
+                svc[0] = '\0';
+            }
+            snprintf(out->dex.safe.tx_service_url,
+                     sizeof(out->dex.safe.tx_service_url), "%s", svc);
+        }
     }
 
     /* fill_delay для shadow-бэкенда */

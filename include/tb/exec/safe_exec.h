@@ -1,18 +1,17 @@
 /* ==========================================================================
- *  tb/exec/safe_exec.h — подготовка исполнения из Safe (v0.5, P0).
+ *  tb/exec/safe_exec.h — подготовка исполнения из Safe (v0.6, p0.1).
  *
- *  Модель ПОДПИСАНИЯ ЧЕЛОВЕКОМ (propose-only): бот НИКОГДА не отправляет
- *  транзакции сам. Он готовит SafeTx (EIP-712-хеш, calldata, свою подпись
- *  владельца) и отдаёт предложение наверх — журнал/файл/консоль; человек
- *  проверяет параметры в кошельке (Safe UI) и подписывает. Исполнение
- *  происходит после набора порога подписей; бот узнаёт о нём по росту
- *  nonce Safe и рассчитывает результат дельтой баланса.
+ *  Модель БЕЗКЛЮЧЕВАЯ (propose-only): приватного ключа бота нет нигде,
+ *  Safe 1-из-1 — единственный владелец человек. Бот читает цепь, готовит
+ *  SafeTx (calldata + EIP-712-хеш для сверки) и публикует предложение:
+ *  артефакт (файл/журнал/консоль) + очередь Safe UI через Transaction
+ *  Service. Подписывает и исполняет человек своим кошельком; бот узнаёт
+ *  об исполнении по росту nonce Safe, результат считает дельтой баланса.
  *
  *  Здесь: сборка calldata (SwapRouter02 exactInput, ERC20 approve),
- *  EIP-712 SafeTx-хеш, подпись владельца-бота (прямая, v=27/28),
- *  RPC-помощники (chainId/nonce/balanceOf/allowance).
- *  Автономная отправка (v0.4 tb_safe_send_exec) УДАЛЕНА: мёртвый путь
- *  в денежном контуре опаснее, чем полезен.
+ *  EIP-712 SafeTx-хеш (эталон сверки для кошелька), RPC-помощники
+ *  (chainId/nonce/balanceOf/allowance), публикация в Transaction
+ *  Service. Отправка транзакций и приватные ключи отсутствуют как класс.
  * ========================================================================== */
 #ifndef TB_EXEC_SAFE_EXEC_H
 #define TB_EXEC_SAFE_EXEC_H
@@ -24,7 +23,6 @@
 #include "tb/exec/route.h"
 #include "tb/exec/u256.h"
 #include "tb/net/http.h"
-#include "tb/sign/tx.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,12 +43,19 @@ typedef struct tb_safe_cfg {
     char       rpc_host_pinned[TB_HTTP_HOST_MAX];
     tb_addr_t  safe;      /* адрес Safe (verifyingContract) */
     tb_addr_t  router;    /* SwapRouter02 */
-    tb_key_t   key;       /* ключ бота-владельца (ok=true) */
     uint64_t   chain_id;  /* 0 -> eth_chainId */
     uint64_t   gas_limit; /* зарезервировано (propose не оценивает газ) */
     uint64_t   max_fee_wei; /* зарезервировано (propose не отправляет) */
     uint32_t   timeout_ms;  /* 0 -> 10000 */
+    /* Transaction Service: публикация предложения в очередь Safe UI.
+     * Пусто — выключено (только артефакт-файл). */
+    char       tx_service_url[TB_HTTP_URL_MAX];
 } tb_safe_cfg_t;
+
+/* Дефолтные эндпоинты очереди по цепи (config подставляет при
+ * отсутствии поля; "off" в конфиге = выключить публикации). */
+#define TB_SAFE_TXSVC_MAINNET "https://safe-transaction-mainnet.safe.global"
+#define TB_SAFE_TXSVC_BASE    "https://safe-transaction-base.safe.global"
 
 /* ---- Calldata ---- */
 
@@ -77,12 +82,6 @@ int tb_safe_tx_hash(const tb_safe_cfg_t *cfg, const tb_addr_t *to,
                     uint64_t value, const uint8_t *data, size_t data_len,
                     uint64_t safe_nonce, uint8_t hash[32], tb_error_t *err);
 
-/* Подпись владельца-бота: ПРЯМАЯ над safeTxHash (EIP-712: Safe для
- * v=27/28 восстанавливает адрес из самого хеша типизированных данных;
- * вариант eth_sign требует v=0 — не используем). */
-int tb_safe_sign(const tb_safe_cfg_t *cfg, const uint8_t safe_tx_hash[32],
-                 uint8_t sig65[65], tb_error_t *err);
-
 /* ---- Предложение SafeTx (propose-only) ---- */
 
 typedef struct tb_safe_proposal {
@@ -93,8 +92,8 @@ typedef struct tb_safe_proposal {
     uint8_t   data[512];   /* внутренний calldata (exactInput/approve) */
     size_t    data_len;
     uint64_t  safe_nonce;  /* nonce Safe на момент подготовки */
-    uint8_t   safe_tx_hash[32]; /* EIP-712 SafeTx-хеш */
-    uint8_t   sig65[65];   /* подпись бота (r, s, v=27/28) */
+    uint8_t   safe_tx_hash[32]; /* EIP-712 SafeTx-хеш — эталон сверки */
+    char      kind[16];    /* "trade" | "approve" (метка вызывающего) */
     uint64_t  created_ms;
     uint64_t  expires_at_ms; /* окно наблюдения (0 -> WATCH_MS) */
 } tb_safe_proposal_t;
@@ -112,7 +111,15 @@ int tb_safe_propose_exec(tb_http_t *h, const tb_safe_cfg_t *c,
 size_t tb_safe_proposal_exec_calldata(const tb_safe_proposal_t *p,
                                       uint8_t *buf, size_t cap);
 
-/* JSON-артефакт предложения (все параметры + хеш + подпись).
+/* Публикация предложения в очередь Safe UI (Transaction Service):
+ * POST /api/v1/safes/{safe}/multisig-transactions/ без подписи — при
+ * пороге 1 одно подтверждение человека в UI = исполнение.
+ * 0 — принято (в очереди); ошибка — вызывающий деградирует на
+ * артефакт-файл, конвейер не останавливать. */
+int tb_safe_service_propose(tb_http_t *h, const tb_safe_cfg_t *c,
+                            const tb_safe_proposal_t *p, tb_error_t *err);
+
+/* JSON-артефакт предложения (все параметры + хеш + verify-блок).
  * Возврат — записанная длина без NUL. */
 size_t tb_safe_proposal_json(const tb_safe_proposal_t *p, char *out,
                              size_t cap);

@@ -90,7 +90,8 @@ SIGN_SRC   := src/sign/tx.c
 DEX_SRC     := src/exec/backend_dex.c src/exec/safe_exec.c
 USER_SRC    := src/user/filters.c src/user/decision.c src/user/arb.c \
               src/user/market.c src/user/webui.c
-# tb_sign (EIP-1559/secp256k1) нужен dex (safe_exec) и демо
+# tb_sign (EIP-1559/secp256k1) — ИЗОЛИРОВАННАЯ утилита тестов:
+# live-контур безключевой (p0.1), dex/демо её не линкуют
 SIGN_OBJ    := $(BUILD)/src/sign/tx.o
 
 CORE_OBJ   := $(addprefix $(BUILD)/,$(CORE_SRC:.c=.o))
@@ -199,12 +200,12 @@ $(BUILD)/exec_demo: $(EXECDEMO_OBJ) $(BUILD)/libtb_core.a
 
 # arb_demo — боевой конвейер: полный набор библиотек (tb_user тянет
 # tb_dex/tb_net/tb_core; tb_runtime — конфиг rapidjson; mbedTLS+secp — TLS/подпись)
-$(BUILD)/arb_demo: $(ARBDEMO_OBJ) $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_sign.a $(BUILD)/libsecp256k1.a \
+$(BUILD)/arb_demo: $(ARBDEMO_OBJ) $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a \
         $(BUILD)/libtb_net.a $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a \
         $(BUILD)/libmbed_tls.a $(BUILD)/libsecp256k1.a
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -Ithird_party/mbedtls/include -Ithird_party/secp256k1/include -o $@ $(ARBDEMO_OBJ) \
-        $(BUILD)/libtb_sign.a $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a \
+	$(CXX) $(CXXFLAGS) -o $@ $(ARBDEMO_OBJ) \
+        $(BUILD)/libtb_user.a $(BUILD)/libtb_dex.a $(BUILD)/libtb_net.a \
         $(BUILD)/libtb_core.a $(BUILD)/libtb_runtime.a $(LDFLAGS_NET) \
         $(BUILD)/libsecp256k1.a $(LDFLAGS)
 
