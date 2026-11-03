@@ -240,6 +240,15 @@ target_link_libraries(test_exec PRIVATE tb_runtime)
 add_test(NAME test_exec COMMAND test_exec)
 set_tests_properties(test_exec PROPERTIES TIMEOUT 30)
 
+# честный replay: экономика мока без арбитражного окна (дефолт) —
+# конвейер обязан найти НОЛЬ сделок; таймаут щедрый на медленных CI
+add_test(NAME replay_honest
+         COMMAND arb_demo --replay --duration 6000 --no-web
+                  --expect-no-trades
+                  --ledger ${CMAKE_BINARY_DIR}/replay-honest.jsonl)
+set_tests_properties(replay_honest PROPERTIES TIMEOUT 120
+                     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # market CLI: офлайн-команды на временных конфигах (без сети)
 add_executable(test_mkt_cli tests/test_mkt_cli.cpp src/tools/market.cpp)
 target_compile_definitions(test_mkt_cli PRIVATE MARKET_NO_MAIN)
