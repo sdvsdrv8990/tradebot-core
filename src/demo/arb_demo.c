@@ -1201,6 +1201,13 @@ int main(int argc, char **argv)
            (unsigned long long)as->pairs_evaluated,
            (unsigned long long)as->pairs_profitable,
            (unsigned long long)as->quote_errors);
+    printf("Поиск неполон (бюджет): %llu | кеш хопов: hit %llu / miss %llu"
+           " / двойной miss %llu | отказ по бюджету RPC: %llu\n",
+           (unsigned long long)as->search_incomplete,
+           (unsigned long long)as->rpc_cache_hit,
+           (unsigned long long)as->rpc_cache_miss,
+           (unsigned long long)as->rpc_duplicate_miss,
+           (unsigned long long)as->rpc_budget_exhausted);
     printf("Ордеров подано: %llu\n",
            (unsigned long long)as->orders_submitted);
     printf("Сделки: filled=%llu failed=%llu canceled=%llu (невыгодность)\n",

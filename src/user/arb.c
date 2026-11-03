@@ -337,10 +337,14 @@ typedef struct decide_job {
     pthread_mutex_t   hops_lock;
     uint64_t          rpc_used;   /* атомарно: хоп-RPC решающей фазы */
     uint64_t          rpc_limit;  /* бюджет батча */
+    /* наблюдаемость кеша/бюджета (H1.2): атомарно из воркеров,
+     * переносятся в tb_arb.stats комбинером (поток цикла) */
+    uint64_t          rpc_cache_hit, rpc_cache_miss;
+    uint64_t          rpc_duplicate_miss, rpc_budget_exhausted;
     /* статистика: filter_rejects — сплиттер; остальное сливают
      * eval-done-ы на потоке цикла (по слоту за вызов, без гонок) */
     struct {
-        uint64_t filter_rejects, quote_errors;
+        uint64_t filter_rejects, quote_errors, search_incomplete;
         uint64_t pairs_evaluated, pairs_profitable;
     } st;
 } decide_job_t;
@@ -352,6 +356,7 @@ struct eval_job {
     size_t        off, n; /* срез [off, off+n) списка пар */
     struct {
         uint64_t quote_errors;
+        uint64_t search_incomplete; /* бюджет RPC: НЕ ошибка котировщика */
         uint64_t pairs_evaluated, pairs_profitable;
     } st;
 };
@@ -388,12 +393,19 @@ static int decide_quote(void *ctx, const tb_addr_t *pool, uint32_t fee,
             cached = hit ? *hit : tb_u256_from_u64(0);
             pthread_mutex_unlock(&dj->hops_lock);
             if (hit) {
+                __atomic_fetch_add(&dj->rpc_cache_hit, 1,
+                                   __ATOMIC_RELAXED);
                 *out = cached;
                 return 0;
             }
+            __atomic_fetch_add(&dj->rpc_cache_miss, 1,
+                               __ATOMIC_RELAXED);
             if (__atomic_add_fetch(&dj->rpc_used, 1, __ATOMIC_RELAXED)
                 > dj->rpc_limit) {
-                TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                __atomic_fetch_add(&dj->rpc_budget_exhausted, 1,
+                                   __ATOMIC_RELAXED);
+                TB_ERROR_SET(err, TB_DOMAIN_USER,
+                             TB_EXEC_SEARCH_INCOMPLETE,
                              "бюджет RPC решающей фазы исчерпан (%llu)",
                              (unsigned long long)dj->rpc_limit);
                 return -1;
@@ -402,6 +414,20 @@ static int decide_quote(void *ctx, const tb_addr_t *pool, uint32_t fee,
                               err) != 0)
                 return -1;
             pthread_mutex_lock(&dj->hops_lock);
+            /* конкурентный duplicate miss: сосед успел закешировать тот
+             * же хоп, пока мы были в RPC — считаем и берём кеш */
+            {
+                const tb_u256_t *again = hop_cache_get(&dj->hops, pool,
+                                                       tin, tout, amount,
+                                                       chain);
+                if (again) {
+                    __atomic_fetch_add(&dj->rpc_duplicate_miss, 1,
+                                       __ATOMIC_RELAXED);
+                    *out = *again;
+                    pthread_mutex_unlock(&dj->hops_lock);
+                    return 0;
+                }
+            }
             hop_cache_put(&dj->hops, pool, tin, tout, amount, chain, out);
             pthread_mutex_unlock(&dj->hops_lock);
             return 0;
@@ -629,6 +655,14 @@ static void eval_work(void *arg)
         int rc = tb_arb_eval_pair(&a->cfg, &pin, decide_quote, ej, &e->r,
                                   &qerr);
         if (rc < 0) {
+            if (qerr.code == TB_EXEC_SEARCH_INCOMPLETE) {
+                /* бюджет RPC: поиск неполон — НЕ ошибка котировщика и
+                 * НЕ вердикт «невыгодно» (окно могло быть пропущено) */
+                ej->st.search_incomplete++;
+                snprintf(e->r.reason, sizeof(e->r.reason),
+                         "поиск неполон: %s", qerr.message);
+                continue;
+            }
             /* не глотаем: причина и развёрнутые детали — в запись */
             ej->st.quote_errors++;
             snprintf(e->r.reason, sizeof(e->r.reason),
@@ -643,6 +677,8 @@ static void eval_work(void *arg)
             }
             continue;
         }
+        if (e->r.incomplete)
+            ej->st.search_incomplete++; /* бюджет проб внутри пары */
         ej->st.pairs_evaluated++;
         if (e->r.ok)
             ej->st.pairs_profitable++;
@@ -663,6 +699,7 @@ static void eval_done(tb_loop_t *loop, void *arg)
     decide_job_t *d = ej->dj;
     /* бакет статистики — в общий слот джобы (поток цикла) */
     d->st.quote_errors += ej->st.quote_errors;
+    d->st.search_incomplete += ej->st.search_incomplete;
     d->st.pairs_evaluated += ej->st.pairs_evaluated;
     d->st.pairs_profitable += ej->st.pairs_profitable;
     if (__atomic_sub_fetch(&d->batch->remaining_eval, 1,
@@ -735,12 +772,13 @@ static void emit_evaluated(tb_arb_t *a, arb_batch_t *b, decide_job_t *d)
         bool same_dex =
             strcmp(b->snaps[e->buy_i].dex, b->snaps[e->sell_i].dex) == 0;
         APPEND("%s{\"buy\":\"%s\",\"sell\":\"%s\",\"ok\":%s,"
-               "\"same_dex\":%s,"
+               "\"same_dex\":%s,\"incomplete\":%s,"
                "\"size\":\"%s\",\"sell_out\":\"%s\",\"opt_size\":\"%s\","
                "\"opt_profit_wei\":\"%s\",\"gas_cost_wei\":%llu,"
                "\"probes\":%u,\"reason\":\"%s\"}",
                k ? "," : "", bp, sp, e->r.ok ? "true" : "false",
-               same_dex ? "true" : "false", sz, so,
+               same_dex ? "true" : "false",
+               e->r.incomplete ? "true" : "false", sz, so,
                os, opf, (unsigned long long)e->r.gas_cost_wei,
                e->r.probes, e->r.reason);
     }
@@ -782,8 +820,13 @@ static void try_combine(arb_batch_t *b)
     /* статистика батча — в общую, на потоке цикла (без атомиков) */
     a->stats.filter_rejects += d->st.filter_rejects;
     a->stats.quote_errors += d->st.quote_errors;
+    a->stats.search_incomplete += d->st.search_incomplete;
     a->stats.pairs_evaluated += d->st.pairs_evaluated;
     a->stats.pairs_profitable += d->st.pairs_profitable;
+    a->stats.rpc_cache_hit += d->rpc_cache_hit;
+    a->stats.rpc_cache_miss += d->rpc_cache_miss;
+    a->stats.rpc_duplicate_miss += d->rpc_duplicate_miss;
+    a->stats.rpc_budget_exhausted += d->rpc_budget_exhausted;
 
     /* веб-страницы: сохранить последние котировки до освобождения батча */
     if (d->batch->seq > a->last_seq) {
