@@ -119,6 +119,13 @@ typedef struct arb_batch {
     size_t          releases;       /* batch_release исполнено */
     bool            pools_submitted;/* submit_pool_jobs отработал (prep) */
     bool            decided;        /* batch_maybe_decide уже позван */
+    /* параллельная решающая фаза (p2.1): сплиттер раздаёт срезы пар
+     * K воркерам; batch держат pool_jobs_n + слот сплиттера + слоты
+     * оценок; комбинер (журнал/подача) — ровно один, на потоке цикла */
+    size_t          eval_slots;     /* атомарно: успешных eval-submit */
+    uint64_t        remaining_eval; /* атомарно: незавершённые оценки */
+    bool            combined;       /* атомарно: комбинер уже отработал */
+    struct decide_job *decide;      /* владение: freed с батчем */
 } arb_batch_t;
 
 static void batch_release(arb_batch_t *b)
@@ -132,10 +139,15 @@ static void batch_release(arb_batch_t *b)
      * r == pool_jobs_n флаг decided уже виден; воркерские dtor-ы бывают
      * только при отклонённых постингах, т.е. когда decided не взведён. */
     bool decided = __atomic_load_n(&b->decided, __ATOMIC_ACQUIRE);
-    size_t total =
-        __atomic_load_n(&b->pool_jobs_n, __ATOMIC_ACQUIRE) + (decided ? 1 : 0);
-    if (r == total)
+    size_t total = __atomic_load_n(&b->pool_jobs_n, __ATOMIC_ACQUIRE)
+                   + (decided ? 1 : 0)
+                   + __atomic_load_n(&b->eval_slots, __ATOMIC_ACQUIRE);
+    if (r == total) {
+        /* сплиттер принадлежит батчу: комбинер читает его данные на
+         * потоке цикла ПОСЛЕ dtor-а сплиттера — раньше freeing нельзя */
+        free(b->decide);
         free(b);
+    }
 }
 
 void batch_maybe_decide(tb_arb_t *a, arb_batch_t *b);
@@ -290,36 +302,75 @@ static void hop_cache_put(hop_cache_t *c, const tb_addr_t *pool,
 
 
 
+/* ---- Параллельная решающая фаза (p2.1) ----
+ * Один воркер тянул ~77 пар x перекотировки последовательно — батч
+ * дорастал до 40-80 с при медленном RPC и не влезал в свежесть.
+ * Теперь: сплиттер (фильтры + список пар + В7-котировка) раздаёт
+ * срезы пар TB_ARB_EVAL_WORKERS воркерам; кеш хопов общий под
+ * мьютексом (парам одного токена нужны одни размеры проб); бюджет
+ * RPC на батч ограничивает разрастание; комбинер (статистика,
+ * журнал, подача ордеров) исполняется ровно один раз на потоке цикла —
+ * последним из {done сплиттера, eval-done}. */
+#define TB_ARB_EVAL_WORKERS 4
+#define TB_ARB_RPC_PER_POOL 24  /* бюджет хоп-RPC на пул батча */
+#define TB_ARB_RPC_BASE    128
+
+typedef struct pair_ref {
+    size_t i, j; /* индексы снапшотов (покупка/продажа) */
+} pair_ref_t;
+
+static void try_combine(arb_batch_t *b);
+
 typedef struct decide_job {
     tb_arb_t         *a;
     arb_batch_t      *batch;
     tb_arb_verdict_t  verdicts[TB_ARB_MAX_POOLS];
-    size_t            results_n;
+    pair_ref_t        pairs[TB_ARB_MAX_RESULTS];
+    size_t            pairs_n;
+    size_t            results_n;   /* = pairs_n: слоты заполняют оценки */
     struct res_ent {
         tb_arb_pair_res_t r;
         size_t buy_i, sell_i;
     } results[TB_ARB_MAX_RESULTS];
     tb_arb_route_quote_t rq; /* В7: лучшая пара батча, реальная котировка */
-    hop_cache_t       hops;  /* кеш хоп-котировок этого батча */
-    /* статистика батча — приватна джобе (воркер), переносится в
-     * tb_arb.stats в decide_done на потоке цикла: батчи перекрываются,
-     * прямые инкременты из воркеров гонялись (TSan) */
+    hop_cache_t       hops;  /* общий кеш хопов батча (hops_lock) */
+    pthread_mutex_t   hops_lock;
+    uint64_t          rpc_used;   /* атомарно: хоп-RPC решающей фазы */
+    uint64_t          rpc_limit;  /* бюджет батча */
+    /* статистика: filter_rejects — сплиттер; остальное сливают
+     * eval-done-ы на потоке цикла (по слоту за вызов, без гонок) */
     struct {
         uint64_t filter_rejects, quote_errors;
         uint64_t pairs_evaluated, pairs_profitable;
     } st;
 } decide_job_t;
 
+/* ---- оценка среза пар: контекст и интерфейс (сплиттер раздаёт) ---- */
+struct eval_job {
+    decide_job_t *dj;
+    arb_batch_t  *batch;
+    size_t        off, n; /* срез [off, off+n) списка пар */
+    struct {
+        uint64_t quote_errors;
+        uint64_t pairs_evaluated, pairs_profitable;
+    } st;
+};
+
+static void eval_work(void *arg);
+static void eval_done(tb_loop_t *loop, void *arg);
+static void eval_dtor(void *arg);
+
 /* Котировщик для tb_arb_eval_pair: пул ищется в watchlist по адресу,
- * ответ кешируется в рамках батча (все перекотировки пинятся блоком
- * цепи — одинаковый запрос даёт одинаковый ответ). */
+ * ответ кешируется в рамках батча (перекотировки пинятся блоком цепи —
+ * одинаковый запрос даёт одинаковый ответ). Кеш под мьютексом, сам
+ * RPC — вне замка; бюджет хоп-RPC общий на батч. */
 static int decide_quote(void *ctx, const tb_addr_t *pool, uint32_t fee,
                         const tb_addr_t *tin, const tb_addr_t *tout,
                         const tb_u256_t *amount, tb_u256_t *out,
                         tb_error_t *err)
 {
-    decide_job_t *d = ctx;
-    tb_arb_t *a = d->a;
+    decide_job_t *dj = ((struct eval_job *)ctx)->dj;
+    tb_arb_t *a = dj->a;
     /* остановка: рвём на границе ЛЮБОГО хопа — решающая фаза гоняет
      * десятки перекотировок, между парами выхода мало */
     if (tb_atomic_load_bool(&a->stopping)) {
@@ -330,16 +381,29 @@ static int decide_quote(void *ctx, const tb_addr_t *pool, uint32_t fee,
     for (uint32_t i = 0; i < a->cfg.pools_n; i++)
         if (tb_addr_eq(&a->cfg.pools[i].pool, pool)) {
             uint64_t chain = a->cfg.pools[i].chain;
-            const tb_u256_t *hit =
-                hop_cache_get(&d->hops, pool, tin, tout, amount, chain);
+            const tb_u256_t *hit;
+            tb_u256_t cached;
+            pthread_mutex_lock(&dj->hops_lock);
+            hit = hop_cache_get(&dj->hops, pool, tin, tout, amount, chain);
+            cached = hit ? *hit : tb_u256_from_u64(0);
+            pthread_mutex_unlock(&dj->hops_lock);
             if (hit) {
-                *out = *hit;
+                *out = cached;
                 return 0;
+            }
+            if (__atomic_add_fetch(&dj->rpc_used, 1, __ATOMIC_RELAXED)
+                > dj->rpc_limit) {
+                TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                             "бюджет RPC решающей фазы исчерпан (%llu)",
+                             (unsigned long long)dj->rpc_limit);
+                return -1;
             }
             if (arb_quote_dir(a, pool, fee, tin, tout, amount, out,
                               err) != 0)
                 return -1;
-            hop_cache_put(&d->hops, pool, tin, tout, amount, chain, out);
+            pthread_mutex_lock(&dj->hops_lock);
+            hop_cache_put(&dj->hops, pool, tin, tout, amount, chain, out);
+            pthread_mutex_unlock(&dj->hops_lock);
             return 0;
         }
     TB_ERROR_SET(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
@@ -348,15 +412,14 @@ static int decide_quote(void *ctx, const tb_addr_t *pool, uint32_t fee,
 }
 
 
+/* ---- сплиттер: фильтры, список пар, В7, раздача срезов ---- */
 static void decide_work(void *arg)
 {
     decide_job_t *d = arg;
     tb_arb_t *a = d->a;
     if (tb_atomic_load_bool(&a->stopping))
-        return; /* остановка: батч не оцениваем, память почистит dtor */
+        return; /* остановка: батч не оцениваем, память почистит release */
     uint64_t now = tb_now_ms();
-
-    /* подсказка блока ставится на цепь каждой пары ниже (мультичейн) */
 
     if (getenv("TB_ARB_DEBUG"))
         for (size_t i = 0; i < d->batch->n; i++) {
@@ -382,14 +445,11 @@ static void decide_work(void *arg)
             d->st.filter_rejects++;
     }
 
-    for (size_t i = 0; i < d->batch->n && d->results_n < TB_ARB_MAX_RESULTS;
-         i++) {
-        if (tb_atomic_load_bool(&a->stopping))
-            break; /* остановка: решающую фазу не тянем */
+    /* список пар: те же ворота, что и прежде (токен/цепь/блок/блок!=0) */
+    for (size_t i = 0; i < d->batch->n; i++) {
         if (!d->verdicts[i].pass)
             continue;
-        for (size_t j = 0;
-             j < d->batch->n && d->results_n < TB_ARB_MAX_RESULTS; j++) {
+        for (size_t j = 0; j < d->batch->n; j++) {
             if (i == j || !d->verdicts[j].pass)
                 continue;
             if (!tb_addr_eq(&d->batch->snaps[i].token,
@@ -405,76 +465,27 @@ static void decide_work(void *arg)
              * каждого пула — разные состояния цепи, сравнивать нельзя */
             if (d->batch->snaps[i].block == 0)
                 continue;
-            /* перекотировки решения — на блоке цепи пары; газ цикла —
-             * цена газа той же цепи × Units (P1: живой газ, не конфиг).
-             * Не достали — 0, движок решения возьмёт gas_est_wei */
-            uint64_t gas_cost = 0;
-            {
-                uint64_t blk = 0;
-                for (uint32_t c = 0; c < d->batch->chains_n; c++)
-                    if (d->batch->chains[c]
-                        == d->batch->snaps[i].chain) {
-                        blk = d->batch->blocks[c];
-                        if (d->batch->gas_wei[c]) {
-                            unsigned __int128 g =
-                                (unsigned __int128)d->batch->gas_wei[c]
-                                * TB_ARB_GAS_UNITS;
-                            gas_cost = g >> 64 ? UINT64_MAX : (uint64_t)g;
-                        }
-                        break;
-                    }
-                tb_exec_dex_set_quote_block(blk);
-            }
-
-            tb_arb_pair_in_t pin = {
-                .buy = &d->batch->snaps[i],
-                .sell = &d->batch->snaps[j],
-                .gas_cost_wei = gas_cost,
-            };
-            struct res_ent *e = &d->results[d->results_n];
-            tb_error_t qerr = TB_ERROR_INIT;
-            int rc = tb_arb_eval_pair(&a->cfg, &pin, decide_quote, d, &e->r,
-                                      &qerr);
-            if (rc < 0) {
-                /* не глотаем: причина и развёрнутые детали — в запись */
-                d->st.quote_errors++;
-                e->buy_i = i;
-                e->sell_i = j;
-                snprintf(e->r.reason, sizeof(e->r.reason),
-                         "ошибка котировщика: %s", qerr.message);
-                if (qerr.details_n) {
-                    char det[384];
-                    if (tb_error_format_details(&qerr, det, sizeof(det)) > 0) {
-                        size_t off = strlen(e->r.reason);
-                        snprintf(e->r.reason + off,
-                                 sizeof(e->r.reason) - off, " | %s", det);
-                    }
-                }
-                d->results_n++;
-                continue;
-            }
-            e->buy_i = i;
-            e->sell_i = j;
-            d->results_n++;
-            d->st.pairs_evaluated++;
-            if (e->r.ok)
-                d->st.pairs_profitable++;
+            if (d->pairs_n >= TB_ARB_MAX_RESULTS)
+                break;
+            d->pairs[d->pairs_n].i = i;
+            d->pairs[d->pairs_n].j = j;
+            d->pairs_n++;
         }
     }
+    d->results_n = d->pairs_n;
+    d->rpc_limit =
+        (uint64_t)d->batch->n * TB_ARB_RPC_PER_POOL + TB_ARB_RPC_BASE;
 
-    /* В7: лучшая по спреду пара батча — реальная котировка маршрута
-     * WETH -> TOKEN -> WETH на probe (оценка спреда может завышать:
-     * комиссии обоих хопов и влияние уже внутри числа Quoter). */
+    /* В7: лучшая по спреду пара — реальная котировка маршрута на probe.
+     * Считается в сплиттере ДО раздачи: комбинер читает rq после нас */
     {
         int best = -1;
         uint32_t best_bp = 0;
-        for (size_t k = 0; k < d->results_n; k++) {
-            struct res_ent *e = &d->results[k];
-            if (strncmp(e->r.reason, "ошибка котировщика", 18) == 0)
-                continue; /* брак котировщика парой не считаем */
+        for (size_t k = 0; k < d->pairs_n; k++) {
             uint32_t r = 0;
-            if (!tb_arb_ratio_bp(&d->batch->snaps[e->buy_i].buy_out,
-                                 &d->batch->snaps[e->sell_i].buy_out, &r)
+            if (!tb_arb_ratio_bp(&d->batch->snaps[d->pairs[k].i].buy_out,
+                                 &d->batch->snaps[d->pairs[k].j].buy_out,
+                                 &r)
                 || r <= 10000)
                 continue;
             if (r - 10000 >= best_bp) {
@@ -483,9 +494,8 @@ static void decide_work(void *arg)
             }
         }
         if (best >= 0) {
-            struct res_ent *e = &d->results[best];
-            const tb_arb_snap_t *bs = &d->batch->snaps[e->buy_i];
-            const tb_arb_snap_t *ss = &d->batch->snaps[e->sell_i];
+            const tb_arb_snap_t *bs = &d->batch->snaps[d->pairs[best].i];
+            const tb_arb_snap_t *ss = &d->batch->snaps[d->pairs[best].j];
             tb_addr_t toks[3] = { bs->weth, bs->token, ss->weth };
             uint32_t fees[2] = { bs->fee, ss->fee };
             tb_error_t rerr = TB_ERROR_INIT;
@@ -493,7 +503,6 @@ static void decide_work(void *arg)
             if (rerr.code == 0) {
                 tb_route_set_pool(&r, 0, &bs->pool);
                 tb_route_set_pool(&r, 1, &ss->pool);
-                /* реальная котировка — на блоке цепи пары */
                 for (uint32_t c = 0; c < d->batch->chains_n; c++)
                     if (d->batch->chains[c] == bs->chain)
                         tb_exec_dex_set_quote_block(
@@ -506,9 +515,12 @@ static void decide_work(void *arg)
                                   &rerr) == 0) {
                     tb_arb_route_quote_t *q = &d->rq;
                     q->ok = true;
-                    snprintf(q->symbol, sizeof(q->symbol), "%s", bs->symbol);
-                    snprintf(q->buy_dex, sizeof(q->buy_dex), "%s", bs->dex);
-                    snprintf(q->sell_dex, sizeof(q->sell_dex), "%s", ss->dex);
+                    snprintf(q->symbol, sizeof(q->symbol), "%s",
+                             bs->symbol);
+                    snprintf(q->buy_dex, sizeof(q->buy_dex), "%s",
+                             bs->dex);
+                    snprintf(q->sell_dex, sizeof(q->sell_dex), "%s",
+                             ss->dex);
                     q->spread_bp = best_bp;
                     q->in_wei = in;
                     q->out_wei = out;
@@ -521,15 +533,161 @@ static void decide_work(void *arg)
             }
         }
     }
+
+    if (tb_atomic_load_bool(&a->stopping))
+        return; /* не плодим оценщиков: decide_done сам комбинирует */
+
+    /* раздача срезов: K воркеров, срезы по ceil(pairs/K) */
+    if (d->pairs_n == 0)
+        return; /* комбинирует decide_done (remaining == 0) */
+    size_t K = TB_ARB_EVAL_WORKERS;
+    if (K > d->pairs_n)
+        K = d->pairs_n;
+    size_t per = (d->pairs_n + K - 1) / K;
+
+    /* remaining_eval — ДО submit-ов: быстрый воркер успел бы
+     * декрементнуть до нашего store, и комбинер не запустился бы
+     * никогда (последний dec увидел бы стартовый 0 -> огромный) */
+    __atomic_store_n(&d->batch->remaining_eval, K, __ATOMIC_RELEASE);
+    for (size_t e = 0; e < K; e++) {
+        size_t off = e * per;
+        if (off >= d->pairs_n)
+            break;
+        size_t n = d->pairs_n - off < per ? d->pairs_n - off : per;
+        struct eval_job *ej = calloc(1, sizeof(*ej));
+        if (!ej) {
+            /* слота не будет: remaining уже учтён; если все так
+             * провалились — remaining == 0 и decide_done (поток
+             * цикла, после нас) запустит комбинер */
+            __atomic_fetch_sub(&d->batch->remaining_eval, 1,
+                               __ATOMIC_ACQ_REL);
+            continue;
+        }
+        ej->dj = d;
+        ej->batch = d->batch;
+        ej->off = off;
+        ej->n = n;
+        __atomic_add_fetch(&d->batch->eval_slots, 1, __ATOMIC_RELEASE);
+        tb_pool_submit_t s = {
+            .job = eval_work,
+            .arg = ej,
+            .arg_dtor = eval_dtor,
+            .loop = a->loop,
+            .done = eval_done,
+            .done_prio = TB_PRIO_HIGH,
+        };
+        if (!tb_threadpool_submit(tb_loop_pool(a->loop), &s)) {
+            __atomic_sub_fetch(&d->batch->eval_slots, 1,
+                               __ATOMIC_RELEASE);
+            free(ej);
+            /* комбинер при remaining==0 запустит decide_done (цикл) */
+            __atomic_fetch_sub(&d->batch->remaining_eval, 1,
+                               __ATOMIC_ACQ_REL);
+        }
+    }
 }
 
-static void decide_done(tb_loop_t *loop, void *arg);
+/* ---- оценка среза пар (воркер) ---- */
+static void eval_work(void *arg)
+{
+    struct eval_job *ej = arg;
+    decide_job_t *d = ej->dj;
+    tb_arb_t *a = d->a;
+
+    for (size_t k = ej->off; k < ej->off + ej->n; k++) {
+        if (tb_atomic_load_bool(&a->stopping))
+            break;
+        tb_arb_snap_t *bs = &d->batch->snaps[d->pairs[k].i];
+        tb_arb_snap_t *ss = &d->batch->snaps[d->pairs[k].j];
+        /* перекотировки решения — на блоке цепи пары; газ цикла —
+         * цена газа той же цепи x Units (P1: живой газ) */
+        uint64_t gas_cost = 0;
+        {
+            uint64_t blk = 0;
+            for (uint32_t c = 0; c < d->batch->chains_n; c++)
+                if (d->batch->chains[c] == bs->chain) {
+                    blk = d->batch->blocks[c];
+                    if (d->batch->gas_wei[c]) {
+                        unsigned __int128 g =
+                            (unsigned __int128)d->batch->gas_wei[c]
+                            * TB_ARB_GAS_UNITS;
+                        gas_cost = g >> 64 ? UINT64_MAX : (uint64_t)g;
+                    }
+                    break;
+                }
+            tb_exec_dex_set_quote_block(blk);
+        }
+        tb_arb_pair_in_t pin = {
+            .buy = bs,
+            .sell = ss,
+            .gas_cost_wei = gas_cost,
+        };
+        struct res_ent *e = &d->results[k];
+        tb_error_t qerr = TB_ERROR_INIT;
+        e->buy_i = d->pairs[k].i;
+        e->sell_i = d->pairs[k].j;
+        int rc = tb_arb_eval_pair(&a->cfg, &pin, decide_quote, ej, &e->r,
+                                  &qerr);
+        if (rc < 0) {
+            /* не глотаем: причина и развёрнутые детали — в запись */
+            ej->st.quote_errors++;
+            snprintf(e->r.reason, sizeof(e->r.reason),
+                     "ошибка котировщика: %s", qerr.message);
+            if (qerr.details_n) {
+                char det[384];
+                if (tb_error_format_details(&qerr, det, sizeof(det)) > 0) {
+                    size_t off2 = strlen(e->r.reason);
+                    snprintf(e->r.reason + off2,
+                             sizeof(e->r.reason) - off2, " | %s", det);
+                }
+            }
+            continue;
+        }
+        ej->st.pairs_evaluated++;
+        if (e->r.ok)
+            ej->st.pairs_profitable++;
+    }
+}
+
+static void eval_dtor(void *arg)
+{
+    struct eval_job *ej = arg;
+    batch_release(ej->batch);
+    free(ej);
+}
+
+static void eval_done(tb_loop_t *loop, void *arg)
+{
+    (void)loop;
+    struct eval_job *ej = arg;
+    decide_job_t *d = ej->dj;
+    /* бакет статистики — в общий слот джобы (поток цикла) */
+    d->st.quote_errors += ej->st.quote_errors;
+    d->st.pairs_evaluated += ej->st.pairs_evaluated;
+    d->st.pairs_profitable += ej->st.pairs_profitable;
+    if (__atomic_sub_fetch(&d->batch->remaining_eval, 1,
+                           __ATOMIC_ACQ_REL)
+        == 0)
+        try_combine(d->batch);
+}
+
+/* done сплиттера: пар нет/оценки не запущены — комбинируем сами;
+ * иначе комбинер — последний eval-done */
+static void decide_done(tb_loop_t *loop, void *arg)
+{
+    (void)loop;
+    decide_job_t *d = arg;
+    if (__atomic_load_n(&d->batch->remaining_eval, __ATOMIC_ACQUIRE) == 0)
+        try_combine(d->batch);
+}
 
 static void decide_dtor(void *arg)
 {
     decide_job_t *d = arg;
-    batch_release(d->batch); /* слот решающей цепочки (последним — free) */
-    free(d);
+    pthread_mutex_destroy(&d->hops_lock);
+    /* сама джоба принадлежит батчу (b->decide): комбинер читает её
+     * данные и после нашего dtor — освобождение в batch_release */
+    batch_release(d->batch);
 }
 
 /* ==========================================================================
@@ -611,10 +769,14 @@ static void emit_evaluated(tb_arb_t *a, arb_batch_t *b, decide_job_t *d)
  *  Фаза 4: подача ордеров (поток цикла)
  * ========================================================================== */
 
-static void decide_done(tb_loop_t *loop, void *arg)
+static void try_combine(arb_batch_t *b)
 {
-    (void)loop;
-    decide_job_t *d = arg;
+    /* ровно один комбинер: гон между decide-done и eval-done снят CAS */
+    bool expected = false;
+    if (!__atomic_compare_exchange_n(&b->combined, &expected, true, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    decide_job_t *d = b->decide;
     tb_arb_t *a = d->a;
 
     /* статистика батча — в общую, на потоке цикла (без атомиков) */
@@ -741,6 +903,9 @@ void batch_maybe_decide(tb_arb_t *a, arb_batch_t *b)
     }
     d->a = a;
     d->batch = b;
+    pthread_mutex_init(&d->hops_lock, NULL);
+    b->decide = d; /* владение у батча: комбинер читает после dtor-а
+                    * сплиттера; NULL обратно только при отказе submit */
 
     tb_pool_submit_t s = {
         .job = decide_work,
@@ -751,6 +916,8 @@ void batch_maybe_decide(tb_arb_t *a, arb_batch_t *b)
         .done = decide_done,
     };
     if (!tb_threadpool_submit(tb_loop_pool(a->loop), &s)) {
+        b->decide = NULL;
+        pthread_mutex_destroy(&d->hops_lock);
         free(d);
         batch_release(b); /* слот решающей цепочки — наш */
     }

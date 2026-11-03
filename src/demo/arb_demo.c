@@ -56,73 +56,107 @@ typedef struct mock_rpc {
 #define USDC_HEX "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 #define USDT_HEX "dac17f958d2ee523a2206206994597c13d831ec7"
 
-/* Ставка: ETH = 2263 USD; fee-тир 500 — «дёшево» (+0.35%), 3000 —
- * «дорого» (−0.35%): спред пары ~0.7% за цикл. Влияние размера
- * линейно и мягкое (1e18 входа ≈ −33%). */
+/* Честная экономика мока (p2.1): реальная комиссия тира вычитается,
+ * ценовой офсет биржи детерминирован crc32 её Quoter-адреса (в
+ * запросе to) — «дешёвых/дорогих тиров» больше нет, круг через один
+ * пул всегда в минус. Демо-окно задаётся TB_MOCK_SPREAD_BN
+ * (б.п. между двумя биржами, дефолт 0 — рынок без арбитража:
+ * конвейер обязан найти НОЛЬ сделок). */
+static int64_t mock_dex_off_bp(const char *to_hex, int weth_in)
+{
+    /* to_hex — 40 hex-символов адреса Quoter'а/роутера без 0x */
+    uint8_t addr[20] = { 0 };
+    if (to_hex) {
+        for (int b = 0; b < 20 && to_hex[b * 2] && to_hex[b * 2 + 1]; b++) {
+            unsigned v = 0;
+            for (int k = 0; k < 2; k++) {
+                char c = to_hex[b * 2 + k];
+                v <<= 4;
+                if (c >= '0' && c <= '9') v |= (unsigned)(c - '0');
+                else if (c >= 'a' && c <= 'f') v |= (unsigned)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') v |= (unsigned)(c - 'A' + 10);
+                else { v = 0; break; }
+            }
+            addr[b] = (uint8_t)v;
+        }
+    }
+    uint32_t h = tb_crc32c(0, addr, sizeof(addr));
+    int64_t bn = 0;
+    {
+        const char *e = getenv("TB_MOCK_SPREAD_BN");
+        if (e)
+            bn = (int64_t)strtoll(e, NULL, 10);
+    }
+    /* bn<=0: офсенты нет вовсе; иначе половина окна каждому
+     * направлению по знаку хеша — спред появляется только МЕЖДУ
+     * биржами, внутри одной круг остаётся отрицательным */
+    if (bn <= 0)
+        return 0;
+    int64_t half = bn / 2;
+    int64_t off = (int64_t)(h % (uint32_t)(2 * (uint32_t)half + 1))
+                  - half;
+    (void)weth_in;
+    return off; /* б.п.: + = пул дороже середины */
+}
+
 static unsigned __int128 mock_rate(const char *token_in_hex, uint64_t fee)
 {
-    unsigned __int128 p;
-    if (strncmp(token_in_hex, USDC_HEX, 40) == 0
-        || strncmp(token_in_hex, USDT_HEX, 40) == 0)
-        p = 1000000000000000000ull; /* обратное направление: 1/P ниже */
-    else
-        p = 2263000000000000000ull; /* 2263.0 в 1e15 */
-    (void)p;
-    /* возвращает модификатор направления и тира вызывающий */
-    if (fee == 500)
-        return 1003500000000000ull; /* 1.0035 в 1e15 */
-    if (fee == 3000)
-        return 996500000000000ull; /* 0.9965 в 1e15 */
-    return 1000000000000000ull;
+    (void)token_in_hex;
+    (void)fee;
+    return 1000000000000000ull; /* 1.0: офсет вносит вызывающий */
 }
 
 /* Вычислить amountOut по calldata QuoterV2. */
-static uint64_t mock_quote(const char *data_hex); /* V3 */
+static uint64_t mock_quote(const char *data_hex, const char *to_hex);
 
 /* Общая математика хопа: направления, тир-модификаторы, влияние размера
  * (покупка WETH->TOKEN / продажа TOKEN->WETH). */
-static uint64_t mock_hop(const char *in_tok, const char *out_tok,
-                         uint64_t amt, uint32_t fee)
+static uint64_t mock_hop2(const char *in_tok, const char *out_tok,
+                          uint64_t amt, uint32_t fee, int64_t off_bp,
+                          int weth_in)
 {
     bool in_is_weth = strncmp(in_tok, WETH_HEX, 40) == 0;
     bool out_is_weth = strncmp(out_tok, WETH_HEX, 40) == 0;
-    /* Тир-модификатор: покупка на «дешёвом» пуле (fee 500) даёт больше
-     * токенов; продажа на «дорогом» (fee 3000) — больше wei. Направления
-     * инверсны, поэтому круг через один пул всегда в минус (спред+влияние),
-     * а через два разных — с прибылью ~0.7%. */
-    unsigned __int128 mod;
-    if (in_is_weth && !out_is_weth)
-        mod = (fee == 500) ? 1003500000000000ull
-                           : (fee == 3000) ? 996500000000000ull
-                                           : 1000000000000000ull;
-    else if (!in_is_weth && out_is_weth)
-        mod = (fee == 3000) ? 1003500000000000ull
-                            : (fee == 500) ? 996500000000000ull
-                                           : 1000000000000000ull;
-    else
-        return 0;
+    if (in_is_weth == out_is_weth)
+        return 0; /* только хаб<->токен */
+
     unsigned __int128 out;
-
     if (in_is_weth) {
-        /* покупка: USDC = wei × P × mod / 1e12 (18 -> 6 знаков) */
-        out = (unsigned __int128)amt * 2263ull * mod / 1000000000000ull
-              / 1000000000000000ull;
-        out = out * (3000000000000000000ull - amt)
-              / 3000000000000000000ull; /* влияние размера */
+        /* покупка: USDC = wei x P / 1e12 (18 -> 6 знаков) */
+        out = (unsigned __int128)amt * 2263ull / 1000000000000ull;
     } else {
-        /* продажа: wei = usd × 1e12 × mod / P */
-        unsigned __int128 p = 2263ull * 1000000000000000ull;
-        out = (unsigned __int128)amt * 1000000000000ull * mod / p;
-        out = out * (3000000000000000ull - amt) / 3000000000000000ull;
+        /* продажа: wei = usd x 1e12 / P */
+        out = (unsigned __int128)amt * 1000000000000ull / 2263ull;
     }
-
+    /* ценовой офсет биржи: покупка на дорогом пуле даёт меньше
+     * токенов, продажа на дорогом — больше wei */
+    if (off_bp) {
+        if (in_is_weth)
+            out = out * (unsigned __int128)(10000 - off_bp) / 10000;
+        else
+            out = out * (unsigned __int128)(10000 + off_bp) / 10000;
+    }
+    /* реальная комиссия тира/биржи */
+    out = out * (unsigned __int128)(1000000ull - fee) / 1000000ull;
+    /* мягкое влияние размера: 1e18 входа ≈ −33% */
+    unsigned __int128 cap = in_is_weth ? 3000000000000000000ull
+                                       : 3000000000000000ull;
+    out = out * (cap - amt) / cap;
     if (out >> 64)
         return 0;
     return (uint64_t)out;
 }
 
+static uint64_t mock_hop(const char *in_tok, const char *out_tok,
+                         uint64_t amt, uint32_t fee, const char *to_hex)
+{
+    bool in_is_weth = strncmp(in_tok, WETH_HEX, 40) == 0;
+    return mock_hop2(in_tok, out_tok, amt, fee,
+                     mock_dex_off_bp(to_hex, in_is_weth), in_is_weth);
+}
+
 /* Разбор calldata QuoterV2 -> mock_hop. */
-static uint64_t mock_quote(const char *data_hex)
+static uint64_t mock_quote(const char *data_hex, const char *to_hex)
 {
     /* 0x + selector(8) + tokenIn(64) + tokenOut(64) + amount(64) + fee */
     const char *w_in = data_hex + 10;
@@ -150,12 +184,12 @@ static uint64_t mock_quote(const char *data_hex)
     num[6] = '\0';
     uint32_t fee = (uint32_t)strtoul(num, NULL, 16);
 
-    return mock_hop(in_tok, out_tok, amt, fee);
+    return mock_hop(in_tok, out_tok, amt, fee, to_hex);
 }
 
 /* Разбор calldata Router.getAmountsOut(uint256, address[]) -> выход пути.
  * Комиссия V2 фиксирована 0.30% — тир-модификатор 3000. */
-static uint64_t mock_amounts_out(const char *data_hex)
+static uint64_t mock_amounts_out(const char *data_hex, const char *to_hex)
 {
     /* 0x + selector(8) + amount(64) + offset(64) + len(64) + tokA + tokB */
     const char *w_amt = data_hex + 10;
@@ -176,7 +210,7 @@ static uint64_t mock_amounts_out(const char *data_hex)
     in_tok[40] = 0;
     memcpy(out_tok, w_b + 24, 40);
     out_tok[40] = 0;
-    return mock_hop(in_tok, out_tok, amt, 3000);
+    return mock_hop(in_tok, out_tok, amt, 3000, to_hex);
 }
 
 /* Ответ eth_call symbol()/decimals(): ABI-данные по адресу токена.
@@ -322,7 +356,7 @@ static void *mock_thread(void *arg)
                 const char *w_amt = d + 8 + 10;
                 for (int i = 48; i < 64; i++)
                     amt = amt * 16 + (uint64_t)hexv(w_amt[i]);
-                out = mock_amounts_out(d + 8);
+                out = mock_amounts_out(d + 8, to ? to + 8 : NULL);
                 ok = 1;
                 result[2 + 63] = '2'; /* слово0: смещение 0x20 */
                 result[2 + 64 + 63] = '2'; /* слово1: длина 2 */
@@ -331,7 +365,7 @@ static void *mock_thread(void *arg)
                 result[258] = '\0';
             }
             if (!ok && d) {
-                out = mock_quote(d + 8);
+                out = mock_quote(d + 8, to ? to + 8 : NULL);
                 ok = 1;
                 for (int i = 0; i < 16; i++) { /* слово 0: значение
                                                  * выровнено ВПРАВО (ABI) */
@@ -455,6 +489,26 @@ static void emit_safe_proposal(app_t *d, const tb_safe_proposal_t *p,
             printf("  в очереди Safe UI: https://app.safe.global/"
                    "eth:%s/transactions/queue\n",
                    safe_h);
+            /* вторичный статус: журнал фиксирует доставку в очередь;
+             * первичный статус исполнения — всегда nonce/bаланс
+             * с цепи (индексер может отставать) */
+            if (d->ledger) {
+                char stx_h[67];
+                stx_h[0] = '0';
+                stx_h[1] = 'x';
+                for (int i = 0; i < 32; i++)
+                    sprintf(stx_h + 2 + i * 2, "%02x",
+                            p->safe_tx_hash[i]);
+                char qpay[320];
+                snprintf(qpay, sizeof(qpay),
+                         "{\"kind\":\"%s\",\"nonce\":%llu,"
+                         "\"safe_tx_hash\":\"%s\"}",
+                         p->kind, (unsigned long long)p->safe_nonce,
+                         stx_h);
+                tb_error_t qerr = TB_ERROR_INIT;
+                tb_ledger_emit(d->ledger, "safe.queued", qpay, NULL,
+                               NULL, &qerr);
+            }
         } else {
             fprintf(stderr, "  сервис очереди недоступен: %s "
                             "(артефакт-файл действителен)\n",
@@ -761,6 +815,7 @@ int main(int argc, char **argv)
     uint64_t duration_ms = 0; /* 0 = без ограничения по времени */
     bool replay = false;
     bool live_exec = false;
+    bool expect_no_trades = false;
     long web_port = 0; /* 0 = не задан (возьмём из конфига), -1 = --no-web */
 
     for (int i = 1; i < argc; i++) {
@@ -774,6 +829,8 @@ int main(int argc, char **argv)
             replay = true;
         else if (strcmp(argv[i], "--live-exec") == 0)
             live_exec = true;
+        else if (strcmp(argv[i], "--expect-no-trades") == 0)
+            expect_no_trades = true;
         else if (strcmp(argv[i], "--web-port") == 0 && i + 1 < argc)
             web_port = strtol(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--no-web") == 0)
@@ -782,7 +839,7 @@ int main(int argc, char **argv)
             fprintf(stderr,
                     "использование: %s [--config ФАЙЛ] [--ledger ФАЙЛ] "
                     "[--duration МС (0=бессрочно)] [--replay] [--live-exec] "
-                    "[--web-port N] [--no-web]\n",
+                    "[--expect-no-trades] [--web-port N] [--no-web]\n",
                     argv[0]);
             return 2;
         }
@@ -849,9 +906,18 @@ int main(int argc, char **argv)
         cfg.deadline_ms = 4000;
         cfg.dex.fill_delay_min_ms = 150;
         cfg.dex.fill_delay_max_ms = 300;
-        printf("режим replay: mock-RPC 127.0.0.1:%u — рынок СИНТЕТИЧЕСКИЙ "
-               "(спред тиров ~0.7%% вшит в mock; живые данные не используются)\n",
-               (unsigned)app.mock.port);
+        {
+            const char *bn = getenv("TB_MOCK_SPREAD_BN");
+            long spread = bn ? strtol(bn, NULL, 10) : 0;
+            printf("режим replay: mock-RPC 127.0.0.1:%u — рынок "
+                   "СИНТЕТИЧЕСКИЙ, экономика честная: реальные комиссии "
+                   "тиров, круг через один пул всегда в минус; окно "
+                   "арбитража TB_MOCK_SPREAD_BN=%ld б.п. — %s\n",
+                   (unsigned)app.mock.port, spread,
+                   spread > 0 ? "сделки возможны"
+                              : "НЕТ арбитража: конвейер обязан "
+                                "найти ноль сделок");
+        }
     }
 
     /* ---- транспорт ---- */
@@ -1154,6 +1220,14 @@ int main(int argc, char **argv)
                 : "Виртуальный PnL: −%s ETH (баланс ниже старта)\n",
            pnl_s);
     printf("Журнал: %s\n", ledger_path);
+
+    if (expect_no_trades && as->orders_submitted > 0) {
+        fprintf(stderr,
+                "ОЖИДАЛСЯ НОЛЬ сделок (рынок без арбитража), подано: "
+                "%llu — экономика/поиск нечестны\n",
+                (unsigned long long)as->orders_submitted);
+        return 1;
+    }
 
     /* Порядок разборки: сначала цикл — join воркеров, иначе цитировщик
      * ещё в блокирующем RPC, а бэкенды под ним уже освобождены
