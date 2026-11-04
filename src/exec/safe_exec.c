@@ -772,3 +772,82 @@ out:
     free(resp);
     return rc;
 }
+
+/* ---- MultiSend (R2) ---- */
+
+size_t tb_safe_build_multisend(uint8_t *buf, size_t cap,
+                               const tb_safe_call_t *calls, size_t n)
+{
+    /* multiSend(bytes): селектор + offset(0x20) + len + payload;
+     * payload = для каждого вызова: op(1)=0, to(20), value(32),
+     * dataLen(32), data (без выравнивания — формат MultiSend) */
+    size_t payload = 0;
+    for (size_t i = 0; i < n; i++)
+        payload += 1 + 20 + 32 + 32 + calls[i].data_len;
+    size_t need = 4 + 32 + 32 + payload;
+    if (!n || cap < need)
+        return 0;
+
+    size_t o = 0;
+    uint8_t sel[4];
+    tb_keccak_selector("multiSend(bytes)", sel);
+    put_selector(buf, &o, ((uint32_t)sel[0] << 24) | ((uint32_t)sel[1] << 16)
+                              | ((uint32_t)sel[2] << 8) | sel[3]);
+    put_word_u64(buf, &o, 32); /* offset к bytes */
+    put_word_u64(buf, &o, payload);
+    for (size_t i = 0; i < n; i++) {
+        const tb_safe_call_t *cl = &calls[i];
+        buf[o++] = 0; /* operation = CALL */
+        memcpy(buf + o, cl->to.b, 20);
+        o += 20;
+        put_word_u64(buf, &o, cl->value);
+        put_word_u64(buf, &o, cl->data_len);
+        memcpy(buf + o, cl->data, cl->data_len);
+        o += cl->data_len;
+    }
+    return o;
+}
+
+int tb_safe_code_exists(tb_http_t *h, const tb_safe_cfg_t *c,
+                        const tb_addr_t *at, bool *exists,
+                        tb_error_t *err)
+{
+    char at_h[43];
+    tb_addr_to_hex(at, at_h, sizeof(at_h));
+    static char body[192];
+    int n = snprintf(body, sizeof(body),
+                     "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getCode\","
+                     "\"params\":[\"%s\",\"latest\"],\"id\":1}",
+                     at_h);
+    if (n < 0 || (size_t)n >= sizeof(body))
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW, "getCode");
+    tb_http_req_t req = { 0 };
+    strcpy(req.method, "POST");
+    strcpy(req.url, c->rpc_url);
+    if (c->rpc_host_pinned[0])
+        strcpy(req.host_pinned, c->rpc_host_pinned);
+    req.body = body;
+    req.body_len = (size_t)n;
+    req.timeout_ms = c->timeout_ms ? c->timeout_ms : 10000;
+    tb_http_resp_t *resp = calloc(1, sizeof(*resp));
+    if (!resp)
+        TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_NO_MEMORY, "getCode");
+    int rc = -1;
+    if (tb_http_request(h, &req, resp, err) == 0
+        && resp->status == 200 && !strstr(resp->body, "\"error\"")) {
+        resp->body[resp->body_len < TB_HTTP_BODY_MAX
+                       ? resp->body_len
+                       : TB_HTTP_BODY_MAX - 1]
+            = '\0';
+        const char *r = strstr(resp->body, "\"result\":\"");
+        if (r) {
+            r += 9;
+            /* "0x" (пусто) или "0x" без hex — контракта нет */
+            *exists = !(r[0] == '0' && r[1] == 'x'
+                        && (r[2] == '"' || r[2] == '\0'));
+            rc = 0;
+        }
+    }
+    free(resp);
+    return rc;
+}

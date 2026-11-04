@@ -130,6 +130,10 @@ typedef struct tb_exec_dex_cfg {
      * mainnet (роутер по умолчанию — SwapRouter02). Несовпадение —
      * предложение не строится (кросс-DEX ждёт Multicall3, план R2). */
     tb_addr_t           router_factory;
+    tb_addr_t           multisend; /* MultiSendCallOnly (R2); 0 ->
+                                    * канонический TB_SAFE_MULTISEND_
+                                    * CALLONLY; проверяется eth_getCode
+                                    * при live-старте */
 } tb_exec_dex_cfg_t;
 
 /* Инициализация заимствованного tb_exec_backend_t (не heap: структура

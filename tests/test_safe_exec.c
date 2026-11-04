@@ -245,6 +245,88 @@ static void mock_stop(mock_t *m)
     close(m->fd);
 }
 
+
+/* ---- декод MultiSend-пачки (тест R2) ---- */
+typedef struct dec_call {
+    tb_addr_t to;
+    const uint8_t *data;
+    size_t len;
+} dec_call_t;
+
+static size_t decode_multisend(const uint8_t *buf, size_t cap,
+                               dec_call_t *calls, size_t max)
+{
+    uint8_t sel[4];
+    tb_keccak_selector("multiSend(bytes)", sel);
+    if (buf[0] != sel[0] || buf[1] != sel[1] || buf[2] != sel[2]
+        || buf[3] != sel[3])
+        return 0;
+    /* offset(32) = 0x20, len(32), payload */
+    size_t o = 4;
+    uint64_t off = 0, plen = 0;
+    for (int i = 0; i < 8; i++)
+        off = (off << 8) | buf[o + 24 + i];
+    o += 32;
+    for (int i = 0; i < 8; i++)
+        plen = (plen << 8) | buf[o + 24 + i];
+    o += 32;
+    (void)off;
+    size_t end = o + plen;
+    size_t n = 0;
+    while (o < end && n < max) {
+        uint8_t op = buf[o++];
+        (void)op;
+        memcpy(calls[n].to.b, buf + o, 20);
+        o += 20;
+        uint64_t val = 0, dlen = 0;
+        for (int i = 0; i < 8; i++)
+            val = (val << 8) | buf[o + 24 + i];
+        o += 32;
+        for (int i = 0; i < 8; i++)
+            dlen = (dlen << 8) | buf[o + 24 + i];
+        o += 32;
+        (void)val;
+        calls[n].data = buf + o;
+        calls[n].len = dlen;
+        o += dlen;
+        n++;
+    }
+    return n;
+}
+
+/* exactInput слово количества по индексу головы (0=amountIn,1=minOut) */
+static uint64_t dec_exact_input_word(const dec_call_t *c, int which)
+{
+    /* голова: offset(0)=4..36, recipient=4+32, amountIn=4+64,
+     * minOut=4+96 (по 32 байта BE) */
+    size_t off = 4 + 32 + 32 * (1 + which);
+    uint64_t v = 0;
+    for (int i = 24; i < 32; i++)
+        v = (v << 8) | c->data[off + i];
+    return v;
+}
+
+/* path-хоп exactInput: fee-слово хопа k (после хвоста len+path) */
+static uint32_t dec_path_fee(const dec_call_t *c, int hop)
+{
+    /* path: token(20) fee(3) token(20) fee(3)... — fee хопа k после
+     * 20 байт его токена: tail + 20 + hop*23 */
+    size_t tail = 4 + 32 * 4 + 32;
+    size_t p = tail + 20 + hop * 23;
+    return (uint32_t)c->data[p] << 16 | (uint32_t)c->data[p + 1] << 8
+           | c->data[p + 2];
+}
+
+static int dec_path_token(const dec_call_t *c, int idx, tb_addr_t *out)
+{
+    size_t tail = 4 + 32 * 4 + 32;
+    size_t p = tail + idx * 23;
+    if (p + 20 > c->len)
+        return -1;
+    memcpy(out->b, c->data + p, 20);
+    return 0;
+}
+
 /* улов предложений */
 static tb_safe_proposal_t g_props[8];
 static int g_prop_n;
@@ -527,6 +609,111 @@ int main(void)
         CHECK(b.poll(&b, tx, tb_now_ms(), &got, &ferr4) == 0);
         CHECK(g_exec_n == 1);
         CHECK(g_execs[0].status == TB_ATTRIB_ERROR);
+
+        /* 6m. R2: кросс-DEX через MultiSendCallOnly — обе биржи в
+         *     одной транзакции, каждая нога своим роутером; пачка
+         *     декодируется, селектор сверен keccak, минимумы цепочкой */
+        {
+            tb_exec_dex_cfg_t cfg4;
+            memset(&cfg4, 0, sizeof(cfg4));
+            strcpy(cfg4.venues[0].name, "uni-test");
+            snprintf(cfg4.venues[0].rpc_url, sizeof(cfg4.venues[0].rpc_url),
+                     "http://127.0.0.1:%u", (unsigned)mock.port);
+            cfg4.venues[0].quoter =
+                A("0x61fFE014bA17989E743c5F6cB21bF9697530B21e");
+            cfg4.venues[0].factory =
+                A("0x1F98431c8aD98523631AE4a59f267346ea31F984");
+            cfg4.venues[0].pools[0] =
+                A("0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"); /* WETH/USDC uni */
+            cfg4.venues[0].pools_n = 1;
+            strcpy(cfg4.venues[1].name, "pancake-test");
+            snprintf(cfg4.venues[1].rpc_url, sizeof(cfg4.venues[1].rpc_url),
+                     "http://127.0.0.1:%u", (unsigned)mock.port);
+            cfg4.venues[1].quoter =
+                A("0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997");
+            cfg4.venues[1].factory =
+                A("0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"); /* чужая */
+            cfg4.venues[1].router =
+                A("0x1b81D678ffb9C0263b24A97847620C99d213eB14"); /* свой */
+            cfg4.venues[1].pools[0] =
+                A("0x1ac1A8FEaAEa1900C4166dEeed0C11cC10669D36"); /* USDC/WETH pan */
+            cfg4.venues[1].pools_n = 1;
+            cfg4.venues_n = 2;
+            cfg4.seed = 9;
+            cfg4.live = true;
+            snprintf(cfg4.safe.rpc_url, sizeof(cfg4.safe.rpc_url),
+                     "http://127.0.0.1:%u", (unsigned)mock.port);
+            cfg4.safe.safe = SAFE;
+            cfg4.safe.router = ROUTER; /* роутер фабрики Uni */
+            cfg4.safe.chain_id = 1;
+            cfg4.approve_cap_wei = 10000000000000000ull;
+            cfg4.on_propose = catch_proposal;
+
+            tb_exec_backend_t b4;
+            CHECK(tb_exec_dex_init(&b4, http, &cfg4, &err) == 0);
+
+            tb_addr_t toks4[3] = { WETH, usdc, WETH };
+            uint32_t fees4[2] = { 500, 500 };
+            tb_route_t r4 = tb_route_encode(toks4, fees4, 3, &err);
+            tb_route_set_pool(&r4, 0, &cfg4.venues[0].pools[0]);
+            tb_route_set_pool(&r4, 1, &cfg4.venues[1].pools[0]);
+            CHECK(r4.len > 0);
+
+            mock.allowance = 2000000000000000000ull;
+            g_prop_n = 0;
+            tb_error_t xerr4 = TB_ERROR_INIT;
+            int rc4 = b4.submit(&b4, &r4, &in, &mn, 0, tb_now_ms(), &tx,
+                                &got, &xerr4);
+            if (rc4 != 1)
+                printf("6m rc=%d: %s\n", rc4, xerr4.message);
+            CHECK(rc4 == 1);
+            CHECK(g_prop_n == 1);
+            CHECK(mock.sendraw_count == 0);
+
+            /* цель execTransaction — MultiSendCallOnly, не роутер */
+            char to_h[43];
+            tb_addr_to_hex(&g_props[0].to, to_h, sizeof(to_h));
+            CHECK(strcasecmp(to_h, "0x40A50Cf359f9E7d0A06deBa8f7c901E4dE094f98")
+                  == 0);
+
+            /* пачка: 2 вызова, каждый exactInput своим роутером */
+            dec_call_t dc[4];
+            size_t dn = decode_multisend(g_props[0].data,
+                                         g_props[0].data_len, dc, 4);
+            CHECK(dn == 2);
+            CHECK(tb_addr_eq(&dc[0].to, &ROUTER)); /* фабрика роутера */
+            CHECK(tb_addr_eq(&dc[1].to, &cfg4.venues[1].router));
+            for (size_t q = 0; q < dn; q++) {
+                CHECK(dc[q].data[0] == 0xb8 && dc[q].data[1] == 0x58
+                      && dc[q].data[2] == 0x18 && dc[q].data[3] == 0x3f);
+            }
+            /* пути: WETH|500|USDC и USDC|500|WETH — fee-тиры на месте */
+            CHECK(dec_path_fee(&dc[0], 0) == 500);
+            CHECK(dec_path_fee(&dc[1], 0) == 500);
+            tb_addr_t t0, t1, t2;
+            CHECK(dec_path_token(&dc[0], 0, &t0) == 0);
+            CHECK(dec_path_token(&dc[0], 1, &t1) == 0);
+            CHECK(tb_addr_eq(&t0, &WETH));
+            CHECK(tb_addr_eq(&t1, &usdc));
+            CHECK(dec_path_token(&dc[1], 0, &t2) == 0);
+            CHECK(tb_addr_eq(&t2, &usdc));
+            /* минимумы: amountIn ноги 2 == ожидаемому выходу ноги 1;
+             * финальный минимум == наш order min_out (900 в тесте) */
+            uint64_t amt0 = dec_exact_input_word(&dc[0], 0);
+            uint64_t amt1 = dec_exact_input_word(&dc[1], 0);
+            CHECK(amt0 == 1000000000000000ull); /* ставка */
+            CHECK(amt1 > 0 && amt1 < amt0 * 3000); /* USDC-масштаб */
+            uint64_t mn1 = dec_exact_input_word(&dc[1], 1);
+            CHECK(mn1 == 900); /* пол ордера — на последней ноге */
+            uint64_t mn0 = dec_exact_input_word(&dc[0], 0);
+            (void)mn0;
+            /* промежуточный минимум > 0 и < ожидаемого выхода ноги 1 */
+            uint64_t mn_mid = dec_exact_input_word(&dc[0], 1);
+            CHECK(mn_mid > 0);
+            CHECK(mn_mid < amt1);
+
+            b4.destroy(&b4);
+        }
 
         /* 6k. ЦЕЛОСТНОСТЬ МАРШРУТА: пул чужой фабрики (Pancake) —
          * роутер исполнения свернёт path в ДРУГОЙ пул; предложение

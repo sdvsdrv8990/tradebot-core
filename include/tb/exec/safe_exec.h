@@ -72,6 +72,35 @@ size_t tb_safe_build_approve(uint8_t *buf, size_t cap,
                              const tb_addr_t *spender,
                              const tb_u256_t *amount);
 
+/* ---- MultiSend (R2): кросс-DEX атомарно ----
+ * Safe.execTransaction может вызвать один контракт, а SwapRouter02
+ * резолвит пулы path СВОЕЙ фабрикой. MultiSend исполняет пачку
+ * вызовов ИЗ Safe (msg.sender каждого внутреннего вызова = Safe —
+ * transferFrom роутеров работает), в одной транзакции: отказ любой
+ * ноги ревертит всё. Используем MultiSendCallOnly (без делегатов).
+ * Адрес канонический (safe-deployments); на цепи проверяется
+ * eth_getCode при live-старте — конфиг его задаёт. */
+#define TB_SAFE_MULTISEND_CALLONLY \
+    "0x40A50Cf359f9E7d0A06deBa8f7c901E4dE094f98"
+
+typedef struct tb_safe_call {
+    tb_addr_t  to;
+    uint64_t   value;      /* всегда 0 в наших сценариях */
+    const uint8_t *data;
+    size_t     data_len;
+} tb_safe_call_t;
+
+/* MultiSendCallOnly.multiSend(bytes): пачка транзакций
+ * (operation=0 | to | value | dataLen | data). Возврат — длина. */
+size_t tb_safe_build_multisend(uint8_t *buf, size_t cap,
+                               const tb_safe_call_t *calls, size_t n);
+
+/* eth_getCode != '0x': контракт по адресу существует (проверка
+ * MultiSend при live-старте). 0 — есть. */
+int tb_safe_code_exists(tb_http_t *h, const tb_safe_cfg_t *c,
+                        const tb_addr_t *at, bool *exists,
+                        tb_error_t *err);
+
 /* Safe.execTransaction(to, value, data, op=0, 0,0,0, 0,0, sig). */
 size_t tb_safe_build_exec_tx(uint8_t *buf, size_t cap, const tb_addr_t *to,
                              uint64_t value, const uint8_t *data,
@@ -89,7 +118,8 @@ typedef struct tb_safe_proposal {
     tb_addr_t safe;        /* verifyingContract */
     tb_addr_t to;          /* цель внутреннего вызова (роутер/токен) */
     uint64_t  value;       /* всегда 0 в наших сценариях */
-    uint8_t   data[512];   /* внутренний calldata (exactInput/approve) */
+    uint8_t   data[2048];  /* calldata: exactInput/approve или
+                             * MultiSend-пачка ног (R2) */
     size_t    data_len;
     uint64_t  safe_nonce;  /* nonce Safe на момент подготовки */
     uint8_t   safe_tx_hash[32]; /* EIP-712 SafeTx-хеш — эталон сверки */
