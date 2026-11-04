@@ -65,12 +65,28 @@ typedef struct tb_arb {
      * перекрываться во времени (schedule_poll немедленный) — запись
      * одного батча и чтение следующего делят слот по индексу пула;
      * гонка той же природы, что у hist[] (целые u256, редкие
-     * перекрытия, худший случай — рванина отображения, не денег) */
+     * перекрытия, худший случай — рванина отображения, не денег).
+     *
+     * Состояния (ревью R3 — прежде был один done, и сбой воротного
+     * RPC молча оставлял СТАРЫЙ профиль действующим):
+     *   GATE_FAILED  — профиль прострочен/не собран: горячие опросы
+     *                  котируются, но решающая фаза пул не пускает;
+     *   GATE_VALID   — профиль подтверждён и живёт (по счётчику И
+     *                  wall-clock: опросы могут задерживаться RPC);
+     *   GATE_REFRESHING — очередной воротной опрос пошёл: старый
+     *                  профиль перестаёт считаться действующим до
+     *                  подтверждения нового (устаревший вердикт не
+     *                  работает «по инерции»). */
+    enum gate_state {
+        GATE_FAILED = 0,
+        GATE_VALID = 1,
+        GATE_REFRESHING = 2,
+    };
     struct tb_arb_gate {
-        bool              done;    /* ворота хотя бы раз отработали */
-        bool              admitted;
+        enum gate_state   state;
         tb_arb_verdict_t  verdict;
-        tb_arb_snap_t     full;    /* последний полный профиль */
+        tb_arb_snap_t     full;     /* последний ПОДТВЕРЖДЁННЫЙ профиль */
+        uint64_t          full_ts;  /* wall-clock подтверждения */
     } gate[TB_ARB_MAX_POOLS];
     uint64_t            poll_no;   /* счётчик опросов для каденса */
 
@@ -242,36 +258,58 @@ static void pool_work(void *arg)
      * воротной: только probe-цена (1 eth_call на пул); профиль
      * ворот (big/sell_back/verdikt) переносится вперёд */
     struct tb_arb_gate *g = &a->gate[j->idx];
-    const bool gate_poll = (j->batch->seq % TB_ARB_GATE_POLLS) == 1
-                           || !g->done; /* сбой ворот -> ретрай сразу,
-                                          * не G опросов темноты */
-    if (!gate_poll && g->done && g->admitted) {
+    /* воротной опрос: по счётчику, ИЛИ профиль прострочен (сбой RPC
+     * -> ретрай сразу), ИЛИ возраст по wall-clock превысил окно
+     * (опросы могут задерживаться: 20 быстрых опросов «в стену»
+     * деградировавшего RPC — это не те 5 минут, что задуманы) */
+    uint64_t age_ms = tb_now_ms() - g->full_ts;
+    const bool gate_poll =
+        (j->batch->seq % TB_ARB_GATE_POLLS) == 1
+        || g->state == GATE_FAILED
+        || (g->state == GATE_VALID
+            && age_ms > TB_ARB_GATE_POLLS * a->cfg.poll_ms * 2);
+
+    if (!gate_poll && g->state == GATE_VALID
+        && g->verdict.pass) {
         if (arb_quote_dir(a, &p->pool, p->fee, &p->weth, &p->token,
                           &probe, &s->buy_out, &err) != 0)
-            return;
+            return; /* цена не пришла: снапшот пуст, ворота не трогаем */
         s->big_out = g->full.big_out;
         s->sell_back = g->full.sell_back;
         s->complete = true; /* цена свежая, профиль — от ворот */
         return;
     }
-    if (!gate_poll && g->done && !g->admitted)
+    if (!gate_poll && g->state == GATE_VALID && !g->verdict.pass)
         return; /* ворота отвели пул: горячие котировки не тратим;
                  * снапшот пуст — решающая фаза его не увидит */
+    if (!gate_poll)
+        return; /* GATE_FAILED/REFRESHING между воротами: пул не
+                 * котируется — старый вердикт не работает по инерции */
 
-    /* воротной каденс: полный профиль (probe + большая проба + круг) */
+    /* воротной каденс: полный профиль (probe + большая проба + круг).
+     * До подтверждения нового профиль НЕ действителен (REFRESHING) */
+    enum gate_state prev_state = g->state;
+    g->state = GATE_REFRESHING;
     tb_u256_t big = probe;
     uint64_t mult =
         a->cfg.liquidity_probe_mult ? a->cfg.liquidity_probe_mult : 10;
     (void)tb_u256_mul_u64(&big, &big, mult);
 
     if (arb_quote_dir(a, &p->pool, p->fee, &p->weth, &p->token, &probe,
-                      &s->buy_out, &err) != 0)
-        return; /* пустой снапшот отсеется фильтром актуальности */
-    if (tb_atomic_load_bool(&a->stopping))
+                      &s->buy_out, &err) != 0) {
+        g->state = GATE_FAILED; /* RPC упал: старый профиль прострочен,
+                                 * следующий опрос — ретрай ворот */
         return;
+    }
+    if (tb_atomic_load_bool(&a->stopping)) {
+        g->state = prev_state ? prev_state : GATE_FAILED;
+        return;
+    }
     if (arb_quote_dir(a, &p->pool, p->fee, &p->weth, &p->token, &big,
-                      &s->big_out, &err) != 0)
+                      &s->big_out, &err) != 0) {
+        g->state = GATE_FAILED;
         return;
+    }
     if (arb_quote_dir(a, &p->pool, p->fee, &p->token, &p->weth,
                       &s->buy_out, &s->sell_back, &err) == 0) {
         s->complete = true; /* всё донесено: фильтрам можно верить */
@@ -282,8 +320,10 @@ static void pool_work(void *arg)
         if (g->verdict.pass)
             tb_arb_hist_push(&a->hist[j->idx], &s->buy_out);
         g->full = *s;
-        g->admitted = g->verdict.pass;
-        g->done = true;
+        g->full_ts = s->ts_ms;
+        g->state = GATE_VALID;
+    } else {
+        g->state = GATE_FAILED;
     }
 }
 
@@ -544,19 +584,16 @@ static void decide_work(void *arg)
      * провёл ли воротной профиль собственное окно */
     for (size_t i = 0; i < d->batch->n; i++) {
         const struct tb_arb_gate *g = &a->gate[d->batch->snaps[i].pool_idx];
-        if (g->done && !g->admitted) {
-            /* ворота отвели пул: причина — вердикт ворот (горячие
-             * котировки не тратились, снапшот пуст) */
-            d->verdicts[i] = g->verdict;
-            d->st.filter_rejects++;
-            continue;
-        }
-        if (!g->done || !d->batch->snaps[i].complete) {
+        if (g->state != GATE_VALID || !d->batch->snaps[i].complete) {
+            /* REFRESHING/FAILED или пустой снапшот: пул не участвует —
+             * старый вердикт не работает по инерции (ревью R3) */
             d->verdicts[i] = (tb_arb_verdict_t){ 0 };
             d->verdicts[i].pass = false;
             snprintf(d->verdicts[i].reject,
                      sizeof(d->verdicts[i].reject),
-                     "ворота: профиль ещё не собран");
+                     g->state == GATE_REFRESHING
+                         ? "ворота: пересчёт (профиль не подтверждён)"
+                         : "ворота: профиль не собран (RPC)");
             d->st.filter_rejects++;
             continue;
         }
@@ -1003,7 +1040,17 @@ static void try_combine(arb_batch_t *b)
                         : 1;
                 slot->last_poll = d->batch->seq;
                 slot->n = n;
-            } else if (free_s) {
+            } else {
+                /* свободного слота нет — LRU: вытесняем самую старую
+                 * серию (ревью R3: заполненная таблица прежде молча
+                 * блокировала дозревание новых пар) */
+                if (!free_s) {
+                    free_s = &a->streaks[0];
+                    for (size_t q = 1; q < TB_ARB_MAX_RESULTS; q++)
+                        if (a->streaks[q].last_poll
+                            < free_s->last_poll)
+                            free_s = &a->streaks[q];
+                }
                 free_s->buy = bs->pool;
                 free_s->sell = ss->pool;
                 free_s->last_poll = d->batch->seq;
