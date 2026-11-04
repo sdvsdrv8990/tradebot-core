@@ -603,25 +603,19 @@ static void decide_work(void *arg)
     }
     (void)now;
 
-    /* список пар: те же ворота, что и прежде (токен/цепь/блок/блок!=0) */
+    /* список пар — через единые ворота tb_arb_pair_gate (R4):
+     * только межбиржевые комбинации (same-DEX кросс-тир не
+     * кандидат — прямое решение владельца); оба направления
+     * (i->j и j->i) оцениваются независимо: это противоположные
+     * сделки, выгодна обычно одна — дублей предложений нет */
     for (size_t i = 0; i < d->batch->n; i++) {
         if (!d->verdicts[i].pass)
             continue;
         for (size_t j = 0; j < d->batch->n; j++) {
             if (i == j || !d->verdicts[j].pass)
                 continue;
-            if (!tb_addr_eq(&d->batch->snaps[i].token,
-                            &d->batch->snaps[j].token))
-                continue;
-            /* В6/мультичейн: блоки не совпали или цепи разные — курсы
-             * несравнимы (номер блока чужой цепи не существует) */
-            if (d->batch->snaps[i].chain != d->batch->snaps[j].chain)
-                continue;
-            if (d->batch->snaps[i].block != d->batch->snaps[j].block)
-                continue;
-            /* блок неизвестен (0 — eth_blockNumber не донёсся): latest
-             * каждого пула — разные состояния цепи, сравнивать нельзя */
-            if (d->batch->snaps[i].block == 0)
+            if (!tb_arb_pair_gate(&d->batch->snaps[i],
+                                  &d->batch->snaps[j]))
                 continue;
             if (d->pairs_n >= TB_ARB_MAX_RESULTS)
                 break;

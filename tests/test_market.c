@@ -72,12 +72,14 @@ static void test_pair_fresh_same_block(void)
     mk_cfg(&cfg);
     uint64_t now = tb_now_ms();
 
+    /* R4: кандидат — ТОЛЬКО межбиржевая комбинация; покупка на
+     * uniswap-v3 (дешевле — больше токенов за пробу), продажа на
+     * pancakeswap-v3 */
     tb_arb_snap_t snaps[2];
-    /* покупка на fee-500 «дешевле» (больше токенов за пробу) */
     snaps[0] = mk_snap(0, POOL_UNI_USDC_500, USDC_HEX, 500, "uniswap-v3",
                        12345, now - 100, 20000, "USDC");
-    snaps[1] = mk_snap(1, POOL_UNI_USDC_3000, USDC_HEX, 3000, "uniswap-v3",
-                       12345, now - 100, 19900, "USDC");
+    snaps[1] = mk_snap(1, POOL_PAN_USDC_500, USDC_HEX, 500,
+                       "pancakeswap-v3", 12345, now - 100, 19900, "USDC");
 
     char json[4096];
     CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
@@ -85,12 +87,66 @@ static void test_pair_fresh_same_block(void)
     CHECK(strstr(json, "\"spread_bp\":50") != NULL); /* 20000/19900 */
     CHECK(strstr(json, "\"symbol\":\"USDC\"") != NULL);
     CHECK(strstr(json, "\"profit_est\":") != NULL);
-    /* два пула — разные адреса и комиссии в снапшоте */
+    /* оба пула в таблице наблюдения */
     CHECK(strstr(json, POOL_UNI_USDC_500) != NULL);
-    CHECK(strstr(json, POOL_UNI_USDC_3000) != NULL);
-    CHECK(strstr(json, "\"fee\":\"0.0500%\"") != NULL);
-    CHECK(strstr(json, "\"fee\":\"0.3000%\"") != NULL);
+    CHECK(strstr(json, POOL_PAN_USDC_500) != NULL);
     CHECK(strstr(json, "\"block\":12345") != NULL);
+
+    /* --- матрица из ревью владельца (R4) на чистом предикате --- */
+    tb_arb_snap_t uni_a = mk_snap(0, POOL_UNI_USDC_500, USDC_HEX, 500,
+                                   "uniswap-v3", 12345, now, 20000,
+                                   "USDC");
+    /* 1: два пула ОДНОЙ биржи (разные тиры) — кандидат НЕ создаётся */
+    tb_arb_snap_t uni_b = mk_snap(1, POOL_UNI_USDC_3000, USDC_HEX, 3000,
+                                   "uniswap-v3", 12345, now, 19900,
+                                   "USDC");
+    CHECK(tb_arb_pair_gate(&uni_a, &uni_b) == false);
+    CHECK(tb_arb_pair_gate(&uni_b, &uni_a) == false);
+    /* 2: две биржи — кандидат создаётся (оба направления) */
+    tb_arb_snap_t pan = mk_snap(2, POOL_PAN_USDC_500, USDC_HEX, 500,
+                                 "pancakeswap-v3", 12345, now, 19900,
+                                 "USDC");
+    CHECK(tb_arb_pair_gate(&uni_a, &pan) == true);
+    CHECK(tb_arb_pair_gate(&pan, &uni_a) == true);
+    /* 3: несколько пулов одной биржи + один другой — межбиржевые
+     * комбинации только с «другой» (3 x 1 = 3, внутри 3-х ноль) */
+    {
+        int cross = 0, same = 0;
+        tb_arb_snap_t grp[4] = { uni_a, uni_b, pan, uni_a };
+        grp[2] = pan;
+        for (int x = 0; x < 3; x++)
+            for (int y = 0; y < 3; y++) {
+                if (x == y)
+                    continue;
+                if (tb_arb_pair_gate(&grp[x], &grp[y]))
+                    cross++;
+                else
+                    same++;
+            }
+        /* grp = {uni_a, uni_b, pan}: uni_a<->uni_b same (2),
+         * uni_a<->pan и uni_b<->pan cross (4) */
+        CHECK(cross == 4);
+        CHECK(same == 2);
+    }
+    /* 4: одинаковый символ, разные адреса токенов — НЕ пара */
+    tb_arb_snap_t other_tok = mk_snap(3, POOL_PAN_USDC_500,
+                                       "0x111111111111111111111111111111"
+                                       "1111111114",
+                                       500, "pancakeswap-v3", 12345, now,
+                                       19900, "USDC" /* символ тот же! */);
+    CHECK(tb_arb_pair_gate(&uni_a, &other_tok) == false);
+    /* 5: разные цепи — НЕ пара */
+    tb_arb_snap_t base_ch = pan;
+    base_ch.chain = 8453;
+    CHECK(tb_arb_pair_gate(&uni_a, &base_ch) == false);
+    /* блок 0 (неизвестен) — НЕ пара */
+    tb_arb_snap_t no_blk = pan;
+    no_blk.block = 0;
+    CHECK(tb_arb_pair_gate(&uni_a, &no_blk) == false);
+    /* разные блоки — НЕ пара */
+    tb_arb_snap_t other_blk = pan;
+    other_blk.block = 12346;
+    CHECK(tb_arb_pair_gate(&uni_a, &other_blk) == false);
 }
 
 static void test_stale_snap_excluded(void)
@@ -137,12 +193,23 @@ static void test_different_chains_excluded(void)
                              sizeof(json)) == 0);
     CHECK(strstr(json, "\"spread_bp\"") == NULL); /* разные цепи */
 
-    /* одна цепь — пара возвращается */
+    /* одна цепь — но обе биржи uniswap-v3: same-DEX кандидатами не
+     * являются (R4) — пары по-прежнему нет; цепь отображается */
+    snaps[1].chain = 1;
+    CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
+                             sizeof(json)) == 0);
+    CHECK(strstr(json, "\"spread_bp\"") == NULL);
+    CHECK(strstr(json, "\"chain\":\"eth\"") != NULL);
+
+    /* одна цепь и РАЗНЫЕ биржи — пара возвращается (mk_snap не
+     * выставляет цепь: вернуть явный 1, как у соседа) */
+    snaps[1] = mk_snap(1, POOL_PAN_USDC_500, USDC_HEX, 500,
+                       "pancakeswap-v3", 12345, now - 100, 19900,
+                       "USDC");
     snaps[1].chain = 1;
     CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
                              sizeof(json)) == 0);
     CHECK(strstr(json, "\"spread_bp\":50") != NULL);
-    CHECK(strstr(json, "\"chain\":\"eth\"") != NULL);
 }
 
 static void test_different_blocks_excluded(void)
@@ -188,8 +255,9 @@ static void test_pub_freshness(void)
     tb_arb_snap_t snaps[2];
     snaps[0] = mk_snap(0, POOL_UNI_USDC_500, USDC_HEX, 500, "uniswap-v3",
                        12345, now - 120000, 20000, "USDC");
-    snaps[1] = mk_snap(1, POOL_UNI_USDC_3000, USDC_HEX, 3000, "uniswap-v3",
-                       12345, now - 120000, 19900, "USDC");
+    snaps[1] = mk_snap(1, POOL_PAN_USDC_500, USDC_HEX, 500,
+                       "pancakeswap-v3", 12345, now - 120000, 19900,
+                       "USDC"); /* R4: межбиржевая пара */
     snaps[0].pub_ms = snaps[1].pub_ms = now - 1000;
 
     char json[4096];
@@ -337,10 +405,11 @@ static void test_block0_excluded(void)
     CHECK(strstr(json, "\"spread_bp\"") == NULL); /* пар нет */
 }
 
-static void test_same_dex_marked(void)
+static void test_same_dex_excluded(void)
 {
-    /* пара одного DEX (кросс-тир) помечена same_dex — UI отличит её
-     * от межбиржевой */
+    /* R4: same-DEX (кросс-тир) кандидатами не являются вовсе —
+     * раньше помечались same_dex:true, теперь их нет в списке пар;
+     * межбиржевые помечаются same_dex:false */
     tb_arb_cfg_t cfg;
     mk_cfg(&cfg);
     uint64_t now = tb_now_ms();
@@ -352,10 +421,10 @@ static void test_same_dex_marked(void)
     char json[4096];
     CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
                              sizeof(json)) == 0);
-    CHECK(strstr(json, "\"spread_bp\":50") != NULL); /* пара собрана */
-    CHECK(strstr(json, "\"same_dex\":true") != NULL);
+    CHECK(strstr(json, "\"spread_bp\"") == NULL); /* same-DEX исключены */
+    CHECK(strstr(json, "\"same_dex\":true") == NULL);
 
-    /* межбиржевая — false */
+    /* межбиржевая — единственный вид пар, same_dex:false */
     snaps[1] = mk_snap(1, POOL_PAN_USDC_500, USDC_HEX, 500,
                        "pancakeswap-v3", 12345, now - 100, 19900, "USDC");
     CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
@@ -370,7 +439,7 @@ int main(void)
     test_different_chains_excluded();
     test_different_blocks_excluded();
     test_block0_excluded();
-    test_same_dex_marked();
+    test_same_dex_excluded();
     test_pub_freshness();
     test_route_quote_section();
     test_validator();
