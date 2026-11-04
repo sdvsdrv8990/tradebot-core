@@ -99,10 +99,13 @@ typedef struct tb_arb {
         uint32_t  n;         /* длина серии на last_poll */
     } streaks[TB_ARB_MAX_RESULTS];
 
-    /* кэш токенов с цепи (В5): symbol/decimals по адресу пула; пустой
-     * символ — цепь не ответила, страница покажет короткий адрес */
+    /* кэш токенов с цепи (В5): symbol/decimals по (адрес+цепь) —
+     * ревью R5: один адрес в разных сетях = разные токены с разными
+     * decimals; пустой символ — цепь не ответила, страница покажет
+     * короткий адрес */
     struct tok_info {
         tb_addr_t addr;
+        uint64_t  chain; /* ключ вместе с addr (Asset ID) */
         char      symbol[16];
         uint8_t   decimals;
     } toks[TB_ARB_MAX_POOLS];
@@ -209,10 +212,12 @@ typedef struct pool_job {
     size_t        idx;
 } pool_job_t;
 
-static const struct tok_info *tok_find(const tb_arb_t *a, const tb_addr_t *t)
+static const struct tok_info *tok_find(const tb_arb_t *a,
+                                       const tb_addr_t *t, uint64_t chain)
 {
     for (uint32_t i = 0; i < a->toks_n; i++)
-        if (tb_addr_eq(&a->toks[i].addr, t))
+        if (a->toks[i].chain == chain
+            && tb_addr_eq(&a->toks[i].addr, t))
             return &a->toks[i];
     return NULL;
 }
@@ -242,7 +247,7 @@ static void pool_work(void *arg)
         if (j->batch->chains[c] == p->chain)
             block = j->batch->blocks[c];
     s->block = block;
-    const struct tok_info *ti = tok_find(a, &p->token);
+    const struct tok_info *ti = tok_find(a, &p->token, p->chain);
     if (ti) {
         snprintf(s->symbol, sizeof(s->symbol), "%s", ti->symbol);
         s->decimals = ti->decimals;
@@ -1459,7 +1464,8 @@ static void pool_wait_n(tb_threadpool_t *pool, size_t n)
 typedef struct tok_job {
     const tb_arb_cfg_t *cfg;
     tb_http_t         *http;
-    struct tok_info    out;  /* addr заполняет постановщик; остальное job */
+    struct tok_info    out;  /* addr+chain заполняет постановщик (Asset
+                              * ID, R5); symbol/decimals — job */
     uint64_t           chain;
     int                ok;
 } tok_job_t;
@@ -1639,6 +1645,7 @@ tb_arb_t *tb_arb_create(const tb_arb_cfg_t *cfg, tb_exec_engine_t *engine,
         struct tok_info *ti = &a->toks[a->toks_n++];
         memset(ti, 0, sizeof(*ti));
         ti->addr = as->addr;
+        ti->chain = as->chain; /* Asset ID = цепь+адрес (R5) */
         snprintf(ti->symbol, sizeof(ti->symbol), "%s", as->symbol);
         ti->decimals = (uint8_t)(as->decimals_known ? as->decimals : 0);
     }
@@ -1656,7 +1663,7 @@ tb_arb_t *tb_arb_create(const tb_arb_cfg_t *cfg, tb_exec_engine_t *engine,
                 const tb_addr_t *t = &a->cfg.pools[i].token;
                 if (tb_addr_eq(t, &a->cfg.weth))
                     continue;
-                if (tok_find(a, t))
+                if (tok_find(a, t, a->cfg.pools[i].chain))
                     continue;
                 bool dup = false;
                 for (size_t k = 0; k < unique && !dup; k++)
@@ -1668,6 +1675,8 @@ tb_arb_t *tb_arb_create(const tb_arb_cfg_t *cfg, tb_exec_engine_t *engine,
                 tjobs[unique].http = http;
                 tjobs[unique].out.addr = *t;
                 tjobs[unique].chain = a->cfg.pools[i].chain;
+                tjobs[unique].out.chain =
+                    a->cfg.pools[i].chain; /* ключ Asset ID (R5) */
                 unique++;
             }
 
