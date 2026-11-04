@@ -86,7 +86,7 @@ static void test_pair_fresh_same_block(void)
                              sizeof(json)) == 0);
     CHECK(strstr(json, "\"spread_bp\":50") != NULL); /* 20000/19900 */
     CHECK(strstr(json, "\"symbol\":\"USDC\"") != NULL);
-    CHECK(strstr(json, "\"profit_est\":") != NULL);
+    CHECK(strstr(json, "\"spread_value_est_wei\":") != NULL);
     /* оба пула в таблице наблюдения */
     CHECK(strstr(json, POOL_UNI_USDC_500) != NULL);
     CHECK(strstr(json, POOL_PAN_USDC_500) != NULL);
@@ -432,8 +432,38 @@ static void test_same_dex_excluded(void)
     CHECK(strstr(json, "\"same_dex\":false") != NULL);
 }
 
+static void test_buy_out_formatting(void)
+{
+    /* R5: бекенд отдаёт raw И formatted — 233211 при 18 decimals
+     * это 0.000…233211, а не 233k токенов */
+    tb_arb_cfg_t cfg;
+    mk_cfg(&cfg);
+    uint64_t now = tb_now_ms();
+    tb_arb_snap_t snaps[2];
+    snaps[0] = mk_snap(0, POOL_UNI_USDC_500, USDC_HEX, 500,
+                       "uniswap-v3", 12345, now - 100, 233211, "WEIRD");
+    snaps[0].decimals = 18; /* 18 знаков: raw 233211 = крошечная доля */
+    snaps[1] = mk_snap(1, POOL_PAN_USDC_500, USDC_HEX, 500,
+                       "pancakeswap-v3", 12345, now - 100, 234000,
+                       "WEIRD");
+    snaps[1].decimals = 18;
+    char json[4096];
+    CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
+                             sizeof(json))
+          == 0);
+    CHECK(strstr(json, "\"buy_out_raw\":\"233211\"") != NULL);
+    CHECK(strstr(json, "\"buy_out_fmt\":\"0.000000\"") != NULL);
+    /* decimals=0 (неизвестен): fmt == raw, без вранья про масштаб */
+    snaps[0].decimals = 0;
+    CHECK(tb_arb_market_json(&cfg, snaps, 2, now, NULL, json,
+                             sizeof(json))
+          == 0);
+    CHECK(strstr(json, "\"buy_out_fmt\":\"233211\"") != NULL);
+}
+
 int main(void)
 {
+    test_buy_out_formatting();
     test_pair_fresh_same_block();
     test_stale_snap_excluded();
     test_different_chains_excluded();

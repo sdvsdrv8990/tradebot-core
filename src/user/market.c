@@ -33,6 +33,48 @@
         }                                                              \
     } while (0)
 
+/* u256 -> строка с учётом decimals: «1.234567» (усечение до 6
+ * знаков дроби, без float; raw остаётся истиной, это отображение).
+ * decimals неизвестен (0) — как целые токены не врём: показываем
+ * raw с пометкой масштаба неопределён — просто целое. */
+static void u256_to_fixed(const tb_u256_t *v, uint8_t decimals,
+                          char *buf, size_t cap)
+{
+    char raw[80];
+    tb_u256_to_dec(v, raw, sizeof(raw));
+    size_t len = strlen(raw);
+    if (decimals == 0) {
+        snprintf(buf, cap, "%s", raw);
+        return;
+    }
+    if (len <= decimals) {
+        /* весь raw — дробь: 0. + (decimals-len нулей) + raw,
+         * усечённо до 6 знаков (233211 при 18 знаках =
+         * 0.000000000000233211 -> «0.000000») */
+        size_t frac = decimals < 6 ? decimals : 6;
+        size_t zeros = decimals - len;
+        char fr[32];
+        size_t fl = 0;
+        for (size_t z = 0; z < zeros && fl < frac; z++)
+            fr[fl++] = '0';
+        for (size_t d = 0; d < len && fl < frac; d++)
+            fr[fl++] = raw[d];
+        fr[fl] = '\0';
+        snprintf(buf, cap, "0.%s", fl ? fr : "0");
+        return;
+    }
+    size_t int_len = len - decimals;
+    size_t frac = decimals < 6 ? decimals : 6; /* 6 знаков довольно */
+    if (int_len + 1 + frac + 1 > cap) {
+        snprintf(buf, cap, "%s", raw);
+        return;
+    }
+    memcpy(buf, raw, int_len);
+    buf[int_len] = '.';
+    memcpy(buf + int_len + 1, raw + int_len, frac);
+    buf[int_len + 1 + frac] = '\0';
+}
+
 /* Короткое имя цепи для страницы; неизвестная — её номер. */
 static const char *chain_name(uint64_t chain)
 {
@@ -109,23 +151,30 @@ int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
         for (size_t i = 0; i < n; i++) {
             if (strcmp(snaps[i].dex, venues[k]) != 0)
                 continue;
-            char pool_s[43], tok_s[43], buy_s[80];
+            char pool_s[43], tok_s[43], buy_s[80], buy_fmt[64];
             tb_addr_to_hex(&snaps[i].pool, pool_s, sizeof(pool_s));
             tb_addr_to_hex(&snaps[i].token, tok_s, sizeof(tok_s));
             tb_u256_to_dec(&snaps[i].buy_out, buy_s, sizeof(buy_s));
+            /* человекочитаемо: raw -> токены по decimals (R5: бекенд
+             * отдавал только минимальные единицы — «233211» выглядело
+             * как 233k токенов, а это 0.000…233211 при 18 знаках) */
+            u256_to_fixed(&snaps[i].buy_out, snaps[i].decimals,
+                          buy_fmt, sizeof(buy_fmt));
             uint32_t round_bp = 0;
             if (!tb_arb_ratio_bp(&snaps[i].sell_back, &pv, &round_bp))
                 round_bp = 0;
             MK_APPEND("%s{\"pool\":\"%s\",\"token\":\"%s\","
                       "\"symbol\":\"%s\",\"decimals\":%u,"
-                      "\"fee\":\"%u.%04u%%\",\"buy_out\":\"%s\","
+                      "\"fee\":\"%u.%04u%%\","
+                      "\"buy_out_raw\":\"%s\","
+                      "\"buy_out_fmt\":\"%s\","
                       "\"round_bp\":%u,\"chain\":\"%s\",\"block\":%llu,"
                       "\"ts_ms\":%llu,"
                       "\"fresh\":%s}",
                       wrote++ ? "," : "", pool_s, tok_s,
                       snaps[i].symbol[0] ? snaps[i].symbol : "",
                       snaps[i].decimals, snaps[i].fee / 10000,
-                      snaps[i].fee % 10000, buy_s, round_bp,
+                      snaps[i].fee % 10000, buy_s, buy_fmt, round_bp,
                       chain_name(snaps[i].chain),
                       (unsigned long long)snaps[i].block,
                       (unsigned long long)snaps[i].ts_ms,
@@ -183,7 +232,7 @@ int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
         MK_APPEND("%s{\"token\":\"%s\",\"symbol\":\"%s\","
                   "\"buy\":\"%s %u.%04u%%\","
                   "\"sell\":\"%s %u.%04u%%\",\"spread_bp\":%u,"
-                  "\"same_dex\":%s,\"profit_est\":\"%s\"}",
+                  "\"same_dex\":%s,\"spread_value_est_wei\":\"%s\"}",
                   k ? "," : "", tok_s, bs->symbol[0] ? bs->symbol : "",
                   bs->dex, bs->fee / 10000, bs->fee % 10000, ss->dex,
                   ss->fee / 10000, ss->fee % 10000, pairs[k].bp,
