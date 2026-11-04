@@ -150,16 +150,10 @@ int tb_arb_market_json(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *snaps,
             /* В1: обе стороны пары обязаны быть свежими */
             if (snap_age_ms(&snaps[j], now_ms) > fmax)
                 continue;
-            if (!tb_addr_eq(&snaps[i].token, &snaps[j].token))
-                continue;
-            /* мультичейн: курсы сравнимы только в одной цепи (номер
-             * блока и хаб чужой цепи не существуют) */
-            if (snaps[i].chain != snaps[j].chain)
-                continue;
-            /* В6: разные блоки — не сравниваем; 0 = блок неизвестен
-             * (latest каждого — разные состояния цепи) — тоже не
-             * сравниваем, вопреки прежнему молчаливому пропуску */
-            if (snaps[i].block == 0 || snaps[i].block != snaps[j].block)
+            /* единые ворота кандидата (R4): токен/цепь/блок и
+             * РАЗНЫЕ биржи — same-DEX кросс-тир в таблицу торговых
+             * кандидатов не попадает (конвейер исключил их же) */
+            if (!tb_arb_pair_gate(&snaps[i], &snaps[j]))
                 continue;
             uint32_t r = 0;
             if (!tb_arb_ratio_bp(&snaps[i].buy_out, &snaps[j].buy_out, &r)

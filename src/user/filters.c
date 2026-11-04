@@ -177,6 +177,24 @@ int tb_arb_filter_eval(const tb_arb_cfg_t *cfg, const tb_arb_snap_t *s,
     return 0;
 }
 
+/* Ворота кандидата пары — см. arb.h (инвариант владельца R4). */
+bool tb_arb_pair_gate(const tb_arb_snap_t *buy,
+                      const tb_arb_snap_t *sell)
+{
+    if (!tb_addr_eq(&buy->token, &sell->token))
+        return false; /* один адрес токена: одинаковый символ без
+                       * совпадения адреса — НЕ пара */
+    if (buy->chain != sell->chain)
+        return false; /* курсы чужих цепей несравнимы */
+    if (buy->block == 0 || buy->block != sell->block)
+        return false; /* блок неизвестен/разный — состояния цепи
+                       * разные (latest каждого — не одно и то же) */
+    if (strcmp(buy->dex, sell->dex) == 0)
+        return false; /* same-DEX (кросс-тир) не кандидат (R4);
+                       * dex-имя — ключ реестра, уникален */
+    return true;
+}
+
 void tb_arb_hist_push(tb_arb_hist_t *h, const tb_u256_t *buy_out)
 {
     h->buf[h->pos] = *buy_out;
