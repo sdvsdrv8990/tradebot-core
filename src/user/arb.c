@@ -37,6 +37,11 @@
 #define TB_ARB_MAX_RESULTS 64 /* пар на батч; 16 молча резало
                                * мультичейн-батчи (до 77 пар) */
 #define TB_ARB_START_THREADS 6 /* параллельные стартерные eth_call */
+#define TB_ARB_GATE_POLLS 20  /* F1: полный профиль пула раз в G
+                               * опросов (~5 мин при poll 15 с); между
+                               * воротами — только probe-цена. Осушение
+                               * пула между воротами ловит решающая
+                               * фаза (атрибуция уже честная) */
 
 typedef struct tb_arb {
     tb_arb_cfg_t         cfg;
@@ -53,6 +58,21 @@ typedef struct tb_arb {
     tb_arb_stats_t       stats;
 
     tb_arb_hist_t        hist[TB_ARB_MAX_POOLS];
+
+    /* F1 — горячий контур: медленный каденс ворот (полный профиль
+     * пула + вердикт фильтров) и быстрый горячий каденс (только
+     * probe-котировка). Заполняется из воркеров пула: батчи могут
+     * перекрываться во времени (schedule_poll немедленный) — запись
+     * одного батча и чтение следующего делят слот по индексу пула;
+     * гонка той же природы, что у hist[] (целые u256, редкие
+     * перекрытия, худший случай — рванина отображения, не денег) */
+    struct tb_arb_gate {
+        bool              done;    /* ворота хотя бы раз отработали */
+        bool              admitted;
+        tb_arb_verdict_t  verdict;
+        tb_arb_snap_t     full;    /* последний полный профиль */
+    } gate[TB_ARB_MAX_POOLS];
+    uint64_t            poll_no;   /* счётчик опросов для каденса */
 
     /* кэш токенов с цепи (В5): symbol/decimals по адресу пула; пустой
      * символ — цепь не ответила, страница покажет короткий адрес */
@@ -208,6 +228,28 @@ static void pool_work(void *arg)
     tb_u256_t probe =
         tb_u256_from_u64(a->cfg.probe_wei ? a->cfg.probe_wei
                                           : 100000000000000ull);
+
+    /* F1: горячий каденс — пул допущен воротами и этот опрос не
+     * воротной: только probe-цена (1 eth_call на пул); профиль
+     * ворот (big/sell_back/verdikt) переносится вперёд */
+    struct tb_arb_gate *g = &a->gate[j->idx];
+    const bool gate_poll = (j->batch->seq % TB_ARB_GATE_POLLS) == 1
+                           || !g->done; /* сбой ворот -> ретрай сразу,
+                                          * не G опросов темноты */
+    if (!gate_poll && g->done && g->admitted) {
+        if (arb_quote_dir(a, &p->pool, p->fee, &p->weth, &p->token,
+                          &probe, &s->buy_out, &err) != 0)
+            return;
+        s->big_out = g->full.big_out;
+        s->sell_back = g->full.sell_back;
+        s->complete = true; /* цена свежая, профиль — от ворот */
+        return;
+    }
+    if (!gate_poll && g->done && !g->admitted)
+        return; /* ворота отвели пул: горячие котировки не тратим;
+                 * снапшот пуст — решающая фаза его не увидит */
+
+    /* воротной каденс: полный профиль (probe + большая проба + круг) */
     tb_u256_t big = probe;
     uint64_t mult =
         a->cfg.liquidity_probe_mult ? a->cfg.liquidity_probe_mult : 10;
@@ -222,8 +264,18 @@ static void pool_work(void *arg)
                       &s->big_out, &err) != 0)
         return;
     if (arb_quote_dir(a, &p->pool, p->fee, &p->token, &p->weth,
-                      &s->buy_out, &s->sell_back, &err) == 0)
+                      &s->buy_out, &s->sell_back, &err) == 0) {
         s->complete = true; /* всё донесено: фильтрам можно верить */
+        /* фильтры — здесь и сейчас (ворота): вердикт и полный профиль
+         * переживут G-1 горячих опросов */
+        tb_arb_filter_eval(&a->cfg, s, &a->hist[j->idx], s->ts_ms,
+                           &g->verdict);
+        if (g->verdict.pass)
+            tb_arb_hist_push(&a->hist[j->idx], &s->buy_out);
+        g->full = *s;
+        g->admitted = g->verdict.pass;
+        g->done = true;
+    }
 }
 
 static void pool_done(tb_loop_t *loop, void *arg)
@@ -477,16 +529,33 @@ static void decide_work(void *arg)
                     (unsigned long long)d->batch->snaps[i].buy_out.w[0],
                     b2, b3);
         }
+    /* F1: вердикты приносят ворота (pool_work воротного каденса);
+     * горячий опрос не гоняет фильтры — их картина меняется редко,
+     * а цена решения — скорость. Свежесть проверяем арифметикой:
+     * провёл ли воротной профиль собственное окно */
     for (size_t i = 0; i < d->batch->n; i++) {
-        tb_arb_filter_eval(&a->cfg, &d->batch->snaps[i],
-                           &a->hist[d->batch->snaps[i].pool_idx], now,
-                           &d->verdicts[i]);
-        if (d->verdicts[i].pass)
-            tb_arb_hist_push(&a->hist[d->batch->snaps[i].pool_idx],
-                             &d->batch->snaps[i].buy_out);
-        else
+        const struct tb_arb_gate *g = &a->gate[d->batch->snaps[i].pool_idx];
+        if (g->done && !g->admitted) {
+            /* ворота отвели пул: причина — вердикт ворот (горячие
+             * котировки не тратились, снапшот пуст) */
+            d->verdicts[i] = g->verdict;
+            d->st.filter_rejects++;
+            continue;
+        }
+        if (!g->done || !d->batch->snaps[i].complete) {
+            d->verdicts[i] = (tb_arb_verdict_t){ 0 };
+            d->verdicts[i].pass = false;
+            snprintf(d->verdicts[i].reject,
+                     sizeof(d->verdicts[i].reject),
+                     "ворота: профиль ещё не собран");
+            d->st.filter_rejects++;
+            continue;
+        }
+        d->verdicts[i] = g->verdict;
+        if (!d->verdicts[i].pass)
             d->st.filter_rejects++;
     }
+    (void)now;
 
     /* список пар: те же ворота, что и прежде (токен/цепь/блок/блок!=0) */
     for (size_t i = 0; i < d->batch->n; i++) {
