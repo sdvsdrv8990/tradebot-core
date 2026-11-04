@@ -707,10 +707,15 @@ int main(void)
             CHECK(mn1 == 900); /* пол ордера — на последней ноге */
             uint64_t mn0 = dec_exact_input_word(&dc[0], 0);
             (void)mn0;
-            /* промежуточный минимум > 0 и < ожидаемого выхода ноги 1 */
+            /* промежуточный минимум > 0 и не выше ожидаемого выхода
+             * ноги 1 (равенство законно: order min близок ожиданию) */
             uint64_t mn_mid = dec_exact_input_word(&dc[0], 1);
             CHECK(mn_mid > 0);
-            CHECK(mn_mid < amt1);
+            if (mn_mid > amt1)
+                printf("mn_mid=%llu amt1=%llu\n",
+                       (unsigned long long)mn_mid,
+                       (unsigned long long)amt1);
+            CHECK(mn_mid <= amt1);
 
             b4.destroy(&b4);
         }
@@ -798,6 +803,57 @@ int main(void)
             CHECK(g_prop_n == 0);
             CHECK(mock.sendraw_count == 0);
             b3.destroy(&b3);
+        }
+
+        /* 6n. БОЛЬШИЕ суммы: промежуточные минимумы обязаны
+         * считаться честно (ревью R3: u128-произведение могло
+         * переполниться ДО проверки; молчаливая деградация до 1 wei
+         * ослабляла защиту; теперь отказ или корректное значение) */
+        {
+            /* amount_in ~ 1e21 (за пределами u64) — движок u256 */
+            tb_u256_t big_in, big_mn;
+            tb_u256_from_dec(&big_in,
+                             "1000000000000000000000", 22, NULL);
+            tb_u256_from_dec(&big_mn,
+                             "999000000000000000000", 21, NULL);
+            tb_u256_t got2;
+            g_prop_n = 0;
+            tb_error_t xerr5 = TB_ERROR_INIT;
+            int rc5 = b.submit(&b, &r, &big_in, &big_mn, 0,
+                               tb_now_ms(), &tx, &got2, &xerr5);
+            /* любое из двух честно: построение с корректными
+             * минимумами ИЛИ явный отказ арифметики; провал —
+             * молчаливая единица в calldata (проверим декодом) */
+            if (rc5 == 1) {
+                CHECK(g_prop_n == 1);
+                /* цель — MultiSend (2 сегмента); финальный минимум
+                 * последней ноги == big_mn */
+                dec_call_t dc5[4];
+                size_t dn5 = decode_multisend(g_props[0].data,
+                                              g_props[0].data_len,
+                                              dc5, 4);
+                CHECK(dn5 == 2);
+                /* u256 слово minOut: старшие байты слова 100..132 */
+                const uint8_t *d5 = dc5[1].data;
+                tb_u256_t mn5 = tb_u256_from_u64(0);
+                for (int w = 0; w < 4; w++) {
+                    uint64_t acc5 = 0;
+                    for (int i = 0; i < 8; i++)
+                        acc5 = (acc5 << 8)
+                               | d5[100 + w * 8 + i];
+                    mn5.w[3 - w] = acc5;
+                }
+                CHECK(tb_u256_cmp(&mn5, &big_mn) == 0);
+            } else {
+                printf("6n refusal: %s\n", xerr5.message);
+                /* отказ допустим, но причина обязана быть явной
+                 * (арифметика минимумов или переполнение calldata),
+                 * не молчаливым ослаблением до 1 wei */
+                CHECK(strstr(xerr5.message, "минимум") != NULL
+                      || strstr(xerr5.message, "calldata") != NULL
+                      || strstr(xerr5.message, "переполнени") != NULL);
+            }
+            CHECK(mock.sendraw_count == 0);
         }
 
         b.destroy(&b);

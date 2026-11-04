@@ -593,6 +593,12 @@ static bool seg_ratio_bp(const tb_u256_t *a, const tb_u256_t *b,
 /* need_prev = expected_prev * ratio(need_next/expected_next, +1 б.п.)
  * Целочисленно в u128 (наши суммы < 2^120); финальный пол ордера
  * держит итоговую гарантию — точности б.п. достаточно. */
+/* need_prev = expected_prev * ratio(need_next/expected_next, +1 б.п.)
+ * Честная u256-арифметика: u128-произведение могло переполниться ДО
+ * проверки (ревью R3) — молчаливая деградация минимума до 1 wei
+ * ослабляла промежуточную защиту почти до нуля. Теперь:
+ * out = expected_prev * ratio / 10000 в 256 битах; переполнение или
+ * невозможность посчитать = отказ строить предложение целиком. */
 static bool seg_scale(tb_u256_t *out, const tb_u256_t *expected_prev,
                       const tb_u256_t *need_next,
                       const tb_u256_t *expected_next)
@@ -602,22 +608,46 @@ static bool seg_scale(tb_u256_t *out, const tb_u256_t *expected_prev,
         return false;
     if (!tb_u256_mul_u64(&ratio, &ratio, 10001)) /* +1 б.п. запас */
         return false;
-    (void)tb_u256_div_u64(&ratio, &ratio, 10000);
-    unsigned __int128 epv = 0, rv = 0;
-    for (int w = 3; w >= 0; w--)
-        epv = (epv << 64) | expected_prev->w[w];
-    for (int w = 3; w >= 0; w--)
-        rv = (rv << 64) | ratio.w[w];
-    unsigned __int128 res = epv * rv / 10000;
-    if (res >> 120)
-        return false; /* за пределами наших сумм — отказ построения */
+    (void)tb_u256_div_u64(&ratio, &ratio, 10000); /* обратно в б.п.:
+                                                    * потеря этой строки
+                                                    * давала ratio x10000
+                                                                    */
+    /* out = expected_prev * ratio / 10000 без 256x256-умножителя:
+     * разложение по словам со сбором частичного переполнения.
+     * ratio <= ~10101 (<< 2^14): произведение точного expected_prev
+     * на слово ratio поместится в u256 c запасом 2^242 */
+    tb_u256_t acc = tb_u256_from_u64(0);
+    tb_u256_t part;
     for (int w = 0; w < 4; w++) {
-        out->w[w] = (uint64_t)(res & 0xffffffffffffffffull);
-        res >>= 64;
+        if (!ratio.w[w])
+            continue;
+        /* part = expected_prev * ratio.w[w] (сдвиг слова) */
+        uint64_t carry = 0;
+        for (int k = 0; k + w < 4; k++) {
+            unsigned __int128 p =
+                (unsigned __int128)expected_prev->w[k] * ratio.w[w]
+                + carry;
+            part.w[k] = (uint64_t)p;
+            carry = (uint64_t)(p >> 64);
+        }
+        if (carry && w)
+            return false; /* старшее слово вылезло — переполнение */
+        for (int k = 4 - w; k < 4; k++)
+            part.w[k] = 0;
+        /* сдвиг на w слов влево */
+        if (w) {
+            for (int k = 3; k >= w; k--)
+                part.w[k] = part.w[k - w];
+            for (int k = w - 1; k >= 0; k--)
+                part.w[k] = 0;
+        }
+        if (!tb_u256_add(&acc, &acc, &part))
+            return false; /* суммарное переполнение 256 бит */
     }
-    return true;
+    if (!tb_u256_div_u64(out, &acc, 10000))
+        return false;
+    return !tb_u256_is_zero(out);
 }
-
 static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
                       const tb_u256_t *amount_in, const tb_u256_t *min_out,
                       uint64_t deadline_ms, uint64_t now_ms,
@@ -818,7 +848,13 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
             for (size_t s = segs_n - 1; s > 0; s--) {
                 if (!seg_scale(&need_out[s - 1], &expected[s - 1],
                                &need_out[s], &expected[s]))
-                    need_out[s - 1] = tb_u256_from_u64(1);
+                    /* ревью R3: промежуточный минимум обязан быть
+                     * рассчитан; молчаливая единица ослабляла защиту —
+                     * отказываем строить предложение целиком */
+                    TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                                  "маршрут: промежуточный минимум "
+                                  "сегмента %zu не считается (арифметика)",
+                                  s - 1);
             }
 
             if (segs_n == 1) {
