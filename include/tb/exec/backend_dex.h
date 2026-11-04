@@ -152,6 +152,8 @@ typedef struct tb_exec_dex_stats {
     uint64_t proposals;      /* live: подготовлено предложений SafeTx */
     uint64_t supersedes;     /* live: замен живого предложения */
     uint64_t allowance_gates;/* live: trade не предложен из-за allowance */
+    uint64_t proposals_expired; /* live: истекло без подписей (на цепи
+                                 * ничего не потрачено) — L2 статистика */
 } tb_exec_dex_stats_t;
 const tb_exec_dex_stats_t *tb_exec_dex_stats(const tb_exec_backend_t *b);
 

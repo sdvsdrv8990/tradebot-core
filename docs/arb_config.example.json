@@ -290,7 +290,8 @@
     "pages": [
       "dashboard",
       "venues",
-      "trades"
+      "trades",
+      "proposals"
     ],
     "bind": "0.0.0.0"
   }

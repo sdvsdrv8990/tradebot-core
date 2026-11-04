@@ -476,6 +476,17 @@ static void emit_safe_proposal(app_t *d, const tb_safe_proposal_t *p,
         tb_ledger_emit(d->ledger, event_type, json, NULL, NULL, &lerr);
     }
 
+    /* L3: хук владельца — команда из ЕГО конфига (доверенный код):
+     * звук/telegram/звонок при предложении; аргументы — путь
+     * артефакта, kind, nonce. Ответ не важен; stderr наследуем */
+    if (d->cfg && d->cfg->on_propose_cmd[0]) {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "%s '%s' %s %llu",
+                 d->cfg->on_propose_cmd, path, p->kind,
+                 (unsigned long long)p->safe_nonce);
+        (void)system(cmd);
+    }
+
     /* очередь Safe UI (Transaction Service): предложение появляется в
      * app.safe.global; при пороге 1 одно подтверждение = исполнение.
      * Ошибка сервиса не ломает конвейер — артефакт уже записан. */
@@ -743,10 +754,42 @@ static const char TRADES_JS[] =
     "rowsSync(document.getElementById('tt'),recs.slice(-100).reverse().map(tradeRow));"
     "}catch(e){}}";
 
+static const char PROPOSALS_JS[] =
+    "let pbuilt=false;"
+    "const pbuild=()=>{if(pbuilt)return;"
+    "document.getElementById('page').innerHTML="
+    "'<h2>Предложения Safe</h2>"
+    "<table><thead><tr><th>время</th><th>тип</th><th>kind</th><th>детали</th></tr>"
+    "</thead><tbody id=\"pt\"></tbody></table>';"
+    "pbuilt=true};"
+    "const propRow=r=>{const t=r.type||'',p=r.payload||{};"
+    "let d='';"
+    "if(t.indexOf('safe.proposal')===0){d=(p.kind||'')+' nonce '+(p.nonce||'?');}"
+    "else if(t==='safe.queued'){d='в очереди Safe UI, nonce '+(p.nonce||'?');}"
+    "else if(t==='safe.executed'){d='исполнено '+(p.safe_tx_hash||'').slice(0,10)+'…';}"
+    "else if(t==='safe.rejected'){d='отказ';}"
+    "else if(t==='safe.unattributed'){d='исполнено другое (наш хеш не найден)';}"
+    "else if(t==='safe.attribution_error'){d='атрибуция не удалась (RPC)';}"
+    "else if(t==='safe.queue_limited'){d='лимит сервиса '+(p.retry_after_ms||0)+'мс';}"
+    "const cls=t.indexOf('executed')>=0?'t-ok':(t.indexOf('rejected')>=0||t.indexOf('error')>=0?'t-err':(t.indexOf('queued')>=0?'t-pend':''));"
+    "return [fmt(r.ts_ms||0),"
+    "cls?('<span class=\"tag '+cls+'\">'+esc(t)+'</span>'):esc(t),"
+    "esc(p.kind||''),esc(d)]};"
+    "async function tick(){try{"
+    "const lg=await (await fetch('/api/proposals')).json();"
+    "const recs=lg.records||[];"
+    "pbuild();"
+    "document.getElementById('mode').textContent='предложения · всего '+recs.length;"
+    "const k=recs.length+':'+(recs[0]?(recs[0].ts_ms||''):'');"
+    "if(changed('props',k))"
+    "rowsSync(document.getElementById('pt'),recs.slice(-100).reverse().map(propRow));"
+    "}catch(e){}}";
+
 static const tb_web_page_t WEB_PAGES[] = {
     {"dashboard", "/", "Дашборд", DASH_JS},
     {"venues", "/venues", "Биржи и цены", VENUES_JS},
     {"trades", "/trades", "Сделки", TRADES_JS},
+    {"proposals", "/proposals", "Предложения", PROPOSALS_JS},
 };
 
 static void web_update_task(tb_loop_t *loop, tb_task_t *task, void *arg)
@@ -1278,6 +1321,13 @@ int main(int argc, char **argv)
            (unsigned long long)as->cancel_fee_wei);
     /* статистика цитировщика пишется воркерами атомарно — читаем так же:
      * цикл уже остановлен, но последний воркер ещё может довести RPC */
+    printf("Предложения: подано %llu | исполнено %llu | истекло %llu | "
+           "заменено %llu | незрелых (персистентность) %llu\n",
+           (unsigned long long)as->orders_submitted,
+           (unsigned long long)es->filled,
+           (unsigned long long)ds->proposals_expired,
+           (unsigned long long)ds->supersedes,
+           (unsigned long long)as->pairs_immature);
     printf("RPC: quote-вызовы %llu, exec-вызовы %llu\n",
            (unsigned long long)tb_atomic_load_u64(&dq->rpc_calls),
            (unsigned long long)tb_atomic_load_u64(&ds->rpc_calls));
