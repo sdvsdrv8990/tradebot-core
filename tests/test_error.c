@@ -1,6 +1,7 @@
 /* tests/test_error.c — ядро обработки ошибок. */
 #include "harness.h"
 #include "tb/core/error.h"
+#include "tb/exec/codes.h" /* уникальность кодов (ревью) */
 #include "tb/core/error_registry.h"
 
 static int g_handler_calls;
@@ -13,8 +14,29 @@ static void counting_handler(const tb_error_t *err, void *user)
     g_last_sev = (tb_severity_t)err->severity;
 }
 
+static void test_codes_unique(void)
+{
+    /* Дубль значения в enum C не ломает сборку (ревью PR #11: два
+     * кода жили на 18) — ловим только явной проверкой пар */
+    const int codes[] = {
+        TB_EXEC_OK, TB_EXEC_ZERO_AMOUNT, TB_EXEC_DEADLINE_PAST,
+        TB_EXEC_INVALID_PATH, TB_EXEC_VALUE_MISMATCH,
+        TB_EXEC_SETTLE_FAILED, TB_EXEC_NOT_WRAPPED, TB_EXEC_SLIPPAGE,
+        TB_EXEC_ROUTE_MISMATCH, TB_EXEC_INSUFFICIENT_BALANCE,
+        TB_EXEC_INSUFFICIENT_LIQUIDITY, TB_EXEC_ALLOWLIST,
+        TB_EXEC_NOTIONAL_LIMIT, TB_EXEC_HOPS_LIMIT, TB_EXEC_OVERFLOW,
+        TB_EXEC_TIMEOUT, TB_EXEC_BACKEND, TB_EXEC_CAPACITY,
+        TB_EXEC_SEARCH_INCOMPLETE, TB_EXEC_BAD_DECIMALS,
+    };
+    size_t n = sizeof(codes) / sizeof(codes[0]);
+    for (size_t i = 0; i < n; i++)
+        for (size_t j = i + 1; j < n; j++)
+            CHECK(codes[i] != codes[j]);
+}
+
 int main(void)
 {
+    test_codes_unique();
     /* ---- Имена ---- */
     CHECK_STR_EQ(tb_domain_name(TB_DOMAIN_API), "API");
     CHECK_STR_EQ(tb_severity_name(TB_SEV_WARN), "WARN");

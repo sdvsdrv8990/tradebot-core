@@ -547,21 +547,33 @@ static void on_dex_execution(const tb_exec_dex_execution_t *e, void *user)
         sprintf(h + 2 + i * 2, "%02x", e->safe_tx_hash[i]);
     char dl[80];
     tb_u256_to_dec(&e->balance_delta, dl, sizeof(dl));
+    const char *outcome;
+    const char *event;
+    switch (e->status) {
+    case TB_ATTRIB_FOUND:
+        outcome = e->success ? "executed" : "rejected";
+        event = e->success ? "safe.executed" : "safe.rejected";
+        break;
+    case TB_ATTRIB_ABSENT:
+        /* запрос успешен, события нашего хеша нет: исполнилось ДРУГОЕ
+         * предложение Safe — это НЕ отказ нашей сделки */
+        outcome = "unattributed";
+        event = "safe.unattributed";
+        break;
+    default: /* TB_ATTRIB_ERROR: проверить не удалось — отдельно от
+              * «не найдено», иначе сбой провайдера выглядел бы
+              * неизвестным исполнением */
+        outcome = "attribution_error";
+        event = "safe.attribution_error";
+        break;
+    }
     char pay[420];
     snprintf(pay, sizeof(pay),
-             "{\"safe_tx_hash\":\"%s\",\"attributed\":%s,"
-             "\"outcome\":\"%s\",\"block\":%llu,\"delta_wei\":\"%s\"}",
-             h, e->found ? "true" : "false",
-             e->found ? (e->success ? "executed" : "rejected") : "unknown",
-             (unsigned long long)e->block, dl);
+             "{\"safe_tx_hash\":\"%s\",\"outcome\":\"%s\","
+             "\"block\":%llu,\"delta_wei\":\"%s\"}",
+             h, outcome, (unsigned long long)e->block, dl);
     tb_error_t lerr = TB_ERROR_INIT;
-    tb_ledger_emit(d->ledger, e->found && e->success ? "safe.executed"
-                                                     : "safe.rejected",
-                   pay, NULL, NULL, &lerr);
-    if (!e->found)
-        tb_ledger_emit(d->ledger, "safe.unattributed", pay, NULL, NULL,
-                       &lerr); /* nonce вырос, но события нашего хеша
-                                * нет: исполнилось другое предложение */
+    tb_ledger_emit(d->ledger, event, pay, NULL, NULL, &lerr);
 }
 
 static app_t g_app;
