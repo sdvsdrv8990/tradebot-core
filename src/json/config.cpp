@@ -363,6 +363,10 @@ extern "C" int tb_arb_cfg_load(tb_arb_cfg_t *out, const char *path,
                         "безключевая модель (Safe 1-из-1), ключ не нужен\n");
         }
         /* очередь Safe UI: дефолт по цепи; "off" = только артефакт-файл */
+        if (!str_field(v, "on_propose_cmd", out->on_propose_cmd,
+                       sizeof(out->on_propose_cmd)))
+            TB_ERROR_FAIL(err, TB_DOMAIN_JSON, TB_JSON_SCHEMA,
+                          "config: network.on_propose_cmd");
         {
             char svc[TB_HTTP_URL_MAX] = { 0 };
             str_field(v, "safe_tx_service_url", svc, sizeof(svc));
@@ -488,7 +492,8 @@ extern "C" void tb_arb_defaults(tb_arb_cfg_t *cfg)
     if (cfg->web.bind[0] == '\0')
         snprintf(cfg->web.bind, sizeof(cfg->web.bind), "127.0.0.1");
     if (cfg->web.pages_n == 0) {
-        const char *std[] = {"dashboard", "venues", "trades"};
+        const char *std[] = {"dashboard", "venues", "trades",
+                             "proposals"};
         for (const char *s : std)
             snprintf(cfg->web.pages[cfg->web.pages_n++],
                      sizeof(cfg->web.pages[0]), "%s", s);

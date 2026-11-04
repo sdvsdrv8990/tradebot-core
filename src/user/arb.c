@@ -74,6 +74,15 @@ typedef struct tb_arb {
     } gate[TB_ARB_MAX_POOLS];
     uint64_t            poll_no;   /* счётчик опросов для каденса */
 
+    /* L2: персистентность спреда — серия последовательных выгодных
+     * батчей пары (ключ: адреса пулов; пишется/читается только на
+     * потоке цикла в комбинере) */
+    struct pair_streak {
+        tb_addr_t buy, sell;
+        uint64_t  last_poll; /* poll последнего «выгодного» батча */
+        uint32_t  n;         /* длина серии на last_poll */
+    } streaks[TB_ARB_MAX_RESULTS];
+
     /* кэш токенов с цепи (В5): symbol/decimals по адресу пула; пустой
      * символ — цепь не ответила, страница покажет короткий адрес */
     struct tok_info {
@@ -968,6 +977,43 @@ static void try_combine(arb_batch_t *b)
         struct res_ent *e = &d->results[k];
         if (a->pending_n >= TB_ARB_MAX_PENDING)
             break;
+
+        /* L2: персистентность — пара допускается к предложению после
+         * K ПОДРЯД выгодных батчей; серия рвётся пропуском. Окно,
+         * живущее один опрос, не переживает человеческую подпись:
+         * предложение истекло бы зря */
+        {
+            tb_arb_snap_t *bs = &d->batch->snaps[e->buy_i];
+            tb_arb_snap_t *ss = &d->batch->snaps[e->sell_i];
+            struct pair_streak *slot = NULL, *free_s = NULL;
+            for (size_t q = 0; q < TB_ARB_MAX_RESULTS; q++) {
+                if (a->streaks[q].n
+                    && tb_addr_eq(&a->streaks[q].buy, &bs->pool)
+                    && tb_addr_eq(&a->streaks[q].sell, &ss->pool)) {
+                    slot = &a->streaks[q];
+                    break;
+                }
+                if (!a->streaks[q].n && !free_s)
+                    free_s = &a->streaks[q];
+            }
+            uint32_t n = 0;
+            if (slot) {
+                n = (slot->last_poll + 1 == d->batch->seq)
+                        ? slot->n + 1
+                        : 1;
+                slot->last_poll = d->batch->seq;
+                slot->n = n;
+            } else if (free_s) {
+                free_s->buy = bs->pool;
+                free_s->sell = ss->pool;
+                free_s->last_poll = d->batch->seq;
+                free_s->n = n = 1;
+            }
+            if (n < TB_ARB_PERSIST_BATCHES) {
+                a->stats.pairs_immature++;
+                continue; /* серия ещё коротка — не предлагаем */
+            }
+        }
         budget--;
 
         /* ставка — оптимум кривой прибыли (фаза B), не минимум */

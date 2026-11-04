@@ -370,6 +370,8 @@ static void serve_client(tb_webui_t *w, int c)
             respond_ledger(w, c, NULL);
         else if (strcmp(name, "trades") == 0)
             respond_ledger(w, c, "trade.");
+        else if (strcmp(name, "proposals") == 0)
+            respond_ledger(w, c, "safe.");
         else
             respond_named(w, c, name);
         return;

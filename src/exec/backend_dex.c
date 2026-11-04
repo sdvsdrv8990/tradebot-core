@@ -982,6 +982,7 @@ static int dex_poll(tb_exec_backend_t *b, uint64_t tx_id, uint64_t now_ms,
          * — отказ: на цепи ничего не было, газ не потрачен. */
         if (now_ms > s->expires_ms) {
             s->tx_id = 0;
+            tb_atomic_add_u64(&c->stats.proposals_expired, 1);
             TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                           "dex: предложение истекло без подписей "
                           "(на цепи ничего не произошло, газ цел)");
