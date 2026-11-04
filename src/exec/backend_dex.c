@@ -525,6 +525,99 @@ static uint64_t dex_rand(dex_ctx_t *c)
     return c->rand_state;
 }
 
+
+/* ---- Сегменты маршрута (R2): хопы одной биржи -> один exactInput ---- */
+
+struct seg_ref {
+    size_t begin, end; /* хопы [begin, end) */
+    tb_addr_t router;
+};
+
+/* Суб-маршрут сегмента: токены/ф/пулы хопов [begin,end). */
+static tb_route_t seg_subroute(const tb_route_t *route,
+                               const struct seg_ref *s, tb_error_t *err)
+{
+    tb_addr_t toks[TB_EXEC_MAX_HOPS + 1];
+    uint32_t fees[TB_EXEC_MAX_HOPS];
+    size_t n = s->end - s->begin;
+    for (size_t h = 0; h < n; h++)
+        fees[h] = tb_route_fee(route, s->begin + h);
+    for (size_t t = 0; t <= n; t++)
+        toks[t] = tb_route_token(route, s->begin + t);
+    tb_route_t sub = tb_route_encode(toks, fees, n + 1, err);
+    if (err->code != 0)
+        return sub;
+    for (size_t h = 0; h < n; h++) {
+        tb_addr_t p = tb_route_pool(route, s->begin + h);
+        tb_route_set_pool(&sub, h, &p);
+    }
+    return sub;
+}
+
+/* Котировка сегмента (цепочка хопов сегмента). */
+static int dex_quote_segment(dex_ctx_t *c, const tb_route_t *route,
+                             const struct seg_ref *s, const tb_u256_t *in,
+                             tb_u256_t *out, tb_error_t *err)
+{
+    tb_error_t re = TB_ERROR_INIT;
+    tb_route_t sub = seg_subroute(route, s, &re);
+    if (re.code != 0) {
+        *err = re;
+        return -1;
+    }
+    return dex_quote_route(c, &sub, in, out, err);
+}
+
+/* ratio_bp = a*10000/b (b>0, результат <= 0xffff), ложь если вне */
+static bool seg_ratio_bp(const tb_u256_t *a, const tb_u256_t *b,
+                         tb_u256_t *out)
+{
+    if (tb_u256_is_zero(b))
+        return false;
+    tb_u256_t x = *a, y = *b;
+    while (y.w[1] || y.w[2] || y.w[3]) {
+        x.w[0] = x.w[1]; x.w[1] = x.w[2]; x.w[2] = x.w[3]; x.w[3] = 0;
+        y.w[0] = y.w[1]; y.w[1] = y.w[2]; y.w[2] = y.w[3]; y.w[3] = 0;
+        if (tb_u256_is_zero(&y))
+            return false;
+    }
+    if (!tb_u256_mul_u64(&x, &x, 10000))
+        return false;
+    (void)tb_u256_div_u64(&x, &x, y.w[0]);
+    if (x.w[1] || x.w[2] || x.w[3] || x.w[0] > 0xffffull)
+        return false;
+    *out = x;
+    return true;
+}
+
+/* need_prev = expected_prev * ratio(need_next/expected_next, +1 б.п.)
+ * Целочисленно в u128 (наши суммы < 2^120); финальный пол ордера
+ * держит итоговую гарантию — точности б.п. достаточно. */
+static bool seg_scale(tb_u256_t *out, const tb_u256_t *expected_prev,
+                      const tb_u256_t *need_next,
+                      const tb_u256_t *expected_next)
+{
+    tb_u256_t ratio;
+    if (!seg_ratio_bp(need_next, expected_next, &ratio))
+        return false;
+    if (!tb_u256_mul_u64(&ratio, &ratio, 10001)) /* +1 б.п. запас */
+        return false;
+    (void)tb_u256_div_u64(&ratio, &ratio, 10000);
+    unsigned __int128 epv = 0, rv = 0;
+    for (int w = 3; w >= 0; w--)
+        epv = (epv << 64) | expected_prev->w[w];
+    for (int w = 3; w >= 0; w--)
+        rv = (rv << 64) | ratio.w[w];
+    unsigned __int128 res = epv * rv / 10000;
+    if (res >> 120)
+        return false; /* за пределами наших сумм — отказ построения */
+    for (int w = 0; w < 4; w++) {
+        out->w[w] = (uint64_t)(res & 0xffffffffffffffffull);
+        res >>= 64;
+    }
+    return true;
+}
+
 static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
                       const tb_u256_t *amount_in, const tb_u256_t *min_out,
                       uint64_t deadline_ms, uint64_t now_ms,
@@ -645,48 +738,149 @@ static int dex_submit(tb_exec_backend_t *b, const tb_route_t *route,
         }
 
         uint8_t calldata[2048];
-        size_t calldata_len = tb_safe_build_exact_input(
-            calldata, sizeof(calldata), route, &c->cfg.safe.safe,
-            amount_in, min_out ? min_out : &out);
-        if (!calldata_len)
-            TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW,
-                          "dex: exactInput calldata");
+        size_t calldata_len = 0; /* заполняет сегментация ниже */
 
-        /* Целостность маршрута: обе ноги обязаны резолвиться фабрикой
-         * роутера исполнения — иначе расчёт и исполнение разъедутся
-         * (path не несёт адресов пулов; ревью L1) */
+        /* Целостность маршрута (R1+R2): path exactInput резолвится
+         * фабрикой РОУТЕРА — хопы чужих фабрик обязаны идти через
+         * venue.router своей биржи. Сегментируем хопы по роутерам:
+         * один сегмент — прямой exactInput; несколько — пачка в
+         * MultiSendCallOnly (одна транзакция Safe; msg.sender
+         * внутренних вызовов = Safe — transferFrom роутеров работает;
+         * отказ любой ноги ревертит всё). Минимумы: последний сегмент
+         * — пол ордера; промежуточные — ожидаемый выход,
+         * промасштабированный до доли final_min/final_expected
+         * (+1 б.п. запас) — двухуровневая защита исходного аудита */
+        tb_addr_t exec_to = c->cfg.safe.router; /* цель execTransaction */
         {
             tb_addr_t rf = c->cfg.router_factory;
             if (tb_addr_is_native(&rf)) {
-                /* дефолт: SwapRouter02 -> фабрика Uniswap V3 mainnet */
                 tb_error_t fe = TB_ERROR_INIT;
                 if (tb_addr_from_hex(&rf,
                                      "0x1F98431c8aD98523631AE4a59f267"
                                      "346ea31F984",
                                      &fe)
                     != 0)
-                    rf = c->cfg.safe.router; /* fallback: гейт пройдёт
-                                              * только same-factory */
+                    rf = c->cfg.safe.router;
             }
+
+            enum { MAXSEG = TB_EXEC_MAX_HOPS };
+            struct seg_ref segs[MAXSEG];
+            size_t segs_n = 0;
             for (size_t h = 0; h < tb_route_hops(route); h++) {
                 tb_addr_t pool = tb_route_pool(route, h);
                 const tb_exec_dex_venue_t *v = venue_by_pool(c, &pool);
                 if (!v)
                     TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
                                   "маршрут: пул хопа %zu вне бирж", h);
-                if (tb_addr_is_native(&v->factory)
-                    || !tb_addr_eq(&v->factory, &rf))
+                tb_addr_t router;
+                if (!tb_addr_is_native(&v->factory)
+                    && tb_addr_eq(&v->factory, &rf)) {
+                    router = c->cfg.safe.router; /* фабрика роутера */
+                } else if (!tb_addr_is_native(&v->router)) {
+                    router = v->router; /* роутер своей биржи (R2) */
+                } else {
                     TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
-                                  "маршрут: хоп %zu (%s) лежит на чужой "
-                                  "фабрике — роутер исполнения свернёт "
-                                  "его в другой пул; предложение не "
-                                  "строится (кросс-DEX = R2/Multicall3)",
+                                  "маршрут: хоп %zu (%s) на чужой "
+                                  "фабрике без venue.router — исполнить "
+                                  "тем же пулом нельзя",
                                   h, v->name);
+                }
+                if (segs_n
+                    && tb_addr_eq(&segs[segs_n - 1].router, &router)) {
+                    segs[segs_n - 1].end = h + 1;
+                } else {
+                    segs[segs_n].begin = h;
+                    segs[segs_n].end = h + 1;
+                    segs[segs_n].router = router;
+                    segs_n++;
+                }
+            }
+
+            /* ожидаемые выходы сегментов: цепочка amountIn */
+            tb_u256_t expected[MAXSEG];
+            {
+                tb_u256_t amt = *amount_in;
+                for (size_t s = 0; s < segs_n; s++) {
+                    tb_error_t qe = TB_ERROR_INIT;
+                    if (dex_quote_segment(c, route, &segs[s], &amt,
+                                          &expected[s], &qe) != 0) {
+                        *err = qe;
+                        return -1;
+                    }
+                    amt = expected[s];
+                }
+            }
+
+            /* цепочка минимумов: need[last] = пол ордера; предыдущие —
+             * доля ожидаемого (final_min/final_expected, +1 б.п.) */
+            tb_u256_t need_out[MAXSEG];
+            need_out[segs_n - 1] = min_out ? *min_out : out;
+            for (size_t s = segs_n - 1; s > 0; s--) {
+                if (!seg_scale(&need_out[s - 1], &expected[s - 1],
+                               &need_out[s], &expected[s]))
+                    need_out[s - 1] = tb_u256_from_u64(1);
+            }
+
+            if (segs_n == 1) {
+                calldata_len = tb_safe_build_exact_input(
+                    calldata, sizeof(calldata), route, &c->cfg.safe.safe,
+                    amount_in, &need_out[0]);
+                if (!calldata_len)
+                    TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW,
+                                  "dex: exactInput calldata");
+            } else {
+                tb_addr_t ms = c->cfg.multisend;
+                if (tb_addr_is_native(&ms)) {
+                    tb_error_t me = TB_ERROR_INIT;
+                    if (tb_addr_from_hex(&ms, TB_SAFE_MULTISEND_CALLONLY,
+                                         &me)
+                        != 0)
+                        TB_ERROR_FAIL(err, TB_DOMAIN_USER, TB_EXEC_BACKEND,
+                                      "маршрут: адрес MultiSend");
+                }
+                uint8_t legs_buf[MAXSEG][2048];
+                tb_safe_call_t calls[MAXSEG];
+                size_t legs = 0;
+                tb_u256_t amt = *amount_in;
+                for (size_t s = 0; s < segs_n; s++) {
+                    tb_error_t qe2 = TB_ERROR_INIT;
+                    tb_u256_t seg_out;
+                    if (dex_quote_segment(c, route, &segs[s], &amt,
+                                          &seg_out, &qe2) != 0) {
+                        *err = qe2;
+                        return -1;
+                    }
+                    tb_error_t re = TB_ERROR_INIT;
+                    tb_route_t sub = seg_subroute(route, &segs[s], &re);
+                    if (re.code != 0 || !sub.len)
+                        TB_ERROR_FAIL(err, TB_DOMAIN_CORE,
+                                      TB_CORE_OVERFLOW,
+                                      "маршрут: суб-путь %zu", s);
+                    size_t ln = tb_safe_build_exact_input(
+                        legs_buf[s], sizeof(legs_buf[s]), &sub,
+                        &c->cfg.safe.safe, &amt, &need_out[s]);
+                    if (!ln)
+                        TB_ERROR_FAIL(err, TB_DOMAIN_CORE,
+                                      TB_CORE_OVERFLOW,
+                                      "маршрут: calldata сегмента %zu", s);
+                    calls[legs].to = segs[s].router;
+                    calls[legs].value = 0;
+                    calls[legs].data = legs_buf[s];
+                    calls[legs].data_len = ln;
+                    legs++;
+                    amt = seg_out;
+                }
+                calldata_len = tb_safe_build_multisend(
+                    calldata, sizeof(calldata), calls, legs);
+                if (!calldata_len)
+                    TB_ERROR_FAIL(err, TB_DOMAIN_CORE, TB_CORE_OVERFLOW,
+                                  "маршрут: multiSend calldata");
+                exec_to = ms; /* execTransaction -> MultiSend */
             }
         }
 
         tb_safe_proposal_t prop;
-        if (tb_safe_propose_exec(c->http, &c->cfg.safe, &c->cfg.safe.router,
+        if (tb_safe_propose_exec(c->http, &c->cfg.safe, &exec_to,
                                  0, calldata, calldata_len, now_ms, &prop,
                                  err) != 0)
             return -1;
